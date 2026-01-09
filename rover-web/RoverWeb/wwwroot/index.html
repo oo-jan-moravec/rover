@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1"
+    />
+    <title>Rover Control</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #0f1419;
+        color: #e6edf3;
+        height: 100vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        padding: 12px 16px;
+        border-bottom: 1px solid #30363d;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        color: #f0f6fc;
+      }
+      .status {
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        color: #8b949e;
+      }
+      .main-grid {
+        display: grid;
+        grid-template-columns: 1fr 400px;
+        grid-template-rows: 1fr auto;
+        gap: 12px;
+        padding: 12px;
+        flex: 1;
+        overflow: hidden;
+      }
+      .camera-section {
+        grid-row: 1 / 3;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+      }
+      .video {
+        flex: 1;
+        border-radius: 8px;
+        border: 2px dashed #30363d;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0d1117;
+        color: #6e7681;
+        font-size: 14px;
+        min-height: 200px;
+      }
+      .controls-section {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .joystick {
+        position: relative;
+        width: 280px;
+        height: 280px;
+        border-radius: 50%;
+        background: #0d1117;
+        border: 2px solid #30363d;
+        touch-action: none;
+        user-select: none;
+      }
+      .joystick-base {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 100px;
+        height: 100px;
+        margin: -50px 0 0 -50px;
+        border-radius: 50%;
+        background: #21262d;
+        border: 2px solid #444c56;
+        pointer-events: none;
+      }
+      .joystick-handle {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 100px;
+        height: 100px;
+        margin: -50px 0 0 -50px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #2ea043 0%, #1f6e2e 100%);
+        border: 3px solid #3fb950;
+        cursor: grab;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+        transition: transform 0.05s ease-out;
+      }
+      .joystick-handle.active {
+        cursor: grabbing;
+        transform: scale(1.05);
+      }
+      .motor-values {
+        display: flex;
+        gap: 24px;
+        font-family: ui-monospace, monospace;
+      }
+      .motor-value {
+        text-align: center;
+      }
+      .motor-label {
+        font-size: 10px;
+        color: #6e7681;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
+      }
+      .motor-num {
+        font-size: 20px;
+        font-weight: 700;
+        color: #58a6ff;
+      }
+      .knobs-section {
+        display: flex;
+        gap: 16px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .knob-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .knob {
+        width: 60px;
+        height: 60px;
+        position: relative;
+        cursor: pointer;
+      }
+      .knob-circle {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        background: linear-gradient(145deg, #1f2428 0%, #161b22 100%);
+        border: 2px solid #30363d;
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5),
+          0 2px 8px rgba(0, 0, 0, 0.3);
+        position: relative;
+      }
+      .knob-indicator {
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        width: 3px;
+        height: 20px;
+        background: #58a6ff;
+        transform-origin: center 22px;
+        border-radius: 2px;
+        margin-left: -1.5px;
+      }
+      .knob-label {
+        font-size: 11px;
+        color: #8b949e;
+        text-align: center;
+        font-weight: 500;
+      }
+      .knob-value {
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        color: #58a6ff;
+        font-weight: 600;
+      }
+      .diagnostics-section {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .diag-header {
+        font-size: 12px;
+        font-weight: 600;
+        color: #8b949e;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
+      }
+      .diag-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+      .diag-card {
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+      }
+      .diag-label {
+        font-size: 10px;
+        color: #6e7681;
+        text-transform: uppercase;
+      }
+      .diag-value {
+        font-family: ui-monospace, monospace;
+        font-size: 18px;
+        font-weight: 700;
+        color: #58a6ff;
+      }
+      .diag-unit {
+        font-size: 10px;
+        color: #6e7681;
+        margin-left: 2px;
+      }
+      .mobile-splitter {
+        display: none;
+        height: 24px;
+        background: #161b22;
+        border-top: 1px solid #30363d;
+        border-bottom: 1px solid #30363d;
+        cursor: ns-resize;
+        touch-action: none;
+        user-select: none;
+        position: relative;
+      }
+      .mobile-splitter::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 40px;
+        height: 4px;
+        background: #444c56;
+        border-radius: 2px;
+      }
+      @media (max-width: 768px) {
+        body {
+          overflow: auto;
+        }
+        .main-grid {
+          grid-template-columns: 1fr;
+          grid-template-rows: var(--camera-height, 40vh) auto;
+          gap: 0;
+          overflow: visible;
+        }
+        .camera-section {
+          grid-row: 1;
+          min-height: 150px;
+          max-height: none;
+          height: var(--camera-height, 40vh);
+        }
+        .video {
+          min-height: 100px;
+          max-height: none;
+        }
+        .mobile-splitter {
+          display: block;
+        }
+        .controls-section {
+          grid-row: 3;
+        }
+        .log-section {
+          display: none;
+        }
+        .joystick {
+          width: 240px;
+          height: 240px;
+        }
+        .joystick-base,
+        .joystick-handle {
+          width: 80px;
+          height: 80px;
+          margin: -40px 0 0 -40px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>Rover Control</h1>
+      <div
+        class="status"
+        id="status"
+      >
+        WS: connecting...
+      </div>
+    </div>
+
+    <div class="main-grid">
+      <div class="camera-section">
+        <iframe
+          id="cameraFeed"
+          style="width: 100%; height: 320px; border: 0; border-radius: 10px"
+          allow="autoplay; fullscreen; microphone; camera"
+        ></iframe>
+      </div>
+
+      <div
+        class="mobile-splitter"
+        id="mobileSplitter"
+      ></div>
+
+      <div class="controls-section">
+        <div
+          class="joystick"
+          id="joystick"
+        >
+          <div class="joystick-base"></div>
+          <div
+            class="joystick-handle"
+            id="joystick-handle"
+          ></div>
+        </div>
+
+        <div class="motor-values">
+          <div class="motor-value">
+            <div class="motor-label">Left</div>
+            <div
+              class="motor-num"
+              id="leftValue"
+            >
+              0
+            </div>
+          </div>
+          <div class="motor-value">
+            <div class="motor-label">Right</div>
+            <div
+              class="motor-num"
+              id="rightValue"
+            >
+              0
+            </div>
+          </div>
+        </div>
+
+        <div class="knobs-section">
+          <div class="knob-container">
+            <div
+              class="knob"
+              id="maxVelKnob"
+            >
+              <div class="knob-circle">
+                <div
+                  class="knob-indicator"
+                  id="maxVelIndicator"
+                ></div>
+              </div>
+            </div>
+            <div class="knob-label">Max Speed</div>
+            <div
+              class="knob-value"
+              id="maxVelValue"
+            >
+              100%
+            </div>
+          </div>
+
+          <div class="knob-container">
+            <div
+              class="knob"
+              id="spinSpeedKnob"
+            >
+              <div class="knob-circle">
+                <div
+                  class="knob-indicator"
+                  id="spinSpeedIndicator"
+                ></div>
+              </div>
+            </div>
+            <div class="knob-label">Spin Speed</div>
+            <div
+              class="knob-value"
+              id="spinSpeedValue"
+            >
+              50%
+            </div>
+          </div>
+
+          <div class="knob-container">
+            <div
+              class="knob"
+              id="turnKnob"
+            >
+              <div class="knob-circle">
+                <div
+                  class="knob-indicator"
+                  id="turnIndicator"
+                ></div>
+              </div>
+            </div>
+            <div class="knob-label">Turn Zone</div>
+            <div
+              class="knob-value"
+              id="turnValue"
+            >
+              15%
+            </div>
+          </div>
+
+          <div class="knob-container">
+            <div
+              class="knob"
+              id="spinKnob"
+            >
+              <div class="knob-circle">
+                <div
+                  class="knob-indicator"
+                  id="spinIndicator"
+                ></div>
+              </div>
+            </div>
+            <div class="knob-label">Spin Zone</div>
+            <div
+              class="knob-value"
+              id="spinValue"
+            >
+              15%
+            </div>
+          </div>
+        </div>
+
+        <div class="knobs-section">
+          <div class="knob-container">
+            <div
+              class="knob"
+              id="fwdKnob"
+            >
+              <div class="knob-circle">
+                <div
+                  class="knob-indicator"
+                  id="fwdIndicator"
+                ></div>
+              </div>
+            </div>
+            <div class="knob-label">Fwd Trim</div>
+            <div
+              class="knob-value"
+              id="fwdValue"
+            >
+              0
+            </div>
+          </div>
+
+          <div class="knob-container">
+            <div
+              class="knob"
+              id="revKnob"
+            >
+              <div class="knob-circle">
+                <div
+                  class="knob-indicator"
+                  id="revIndicator"
+                ></div>
+              </div>
+            </div>
+            <div class="knob-label">Rev Trim</div>
+            <div
+              class="knob-value"
+              id="revValue"
+            >
+              0
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="diagnostics-section">
+        <div class="diag-header">📊 System Diagnostics</div>
+        <div class="diag-grid">
+          <div class="diag-card">
+            <div class="diag-label">CPU Temp</div>
+            <div class="diag-value">
+              <span id="cpuTemp">--</span><span class="diag-unit">°C</span>
+            </div>
+          </div>
+          <div class="diag-card">
+            <div class="diag-label">WiFi</div>
+            <div class="diag-value">
+              <span id="wifiSignal">--</span><span class="diag-unit">%</span>
+            </div>
+          </div>
+          <div class="diag-card">
+            <div class="diag-label">Ping</div>
+            <div class="diag-value">
+              <span id="pingMs">--</span><span class="diag-unit">ms</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

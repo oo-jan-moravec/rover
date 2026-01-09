@@ -1,0 +1,4 @@
+bin
+obj
+rover-web/RoverWeb/Properties/launchSettings.json
+rover-web/DEPLOYMENT.md
