@@ -7,6 +7,7 @@
       content="width=device-width,initial-scale=1"
     />
     <title>Rover Control</title>
+    <script src="https://kit.fontawesome.com/1d4131bbf4.js" crossorigin="anonymous"></script>
     <style>
       * {
         box-sizing: border-box;
@@ -57,17 +58,22 @@
         display: flex;
         flex-direction: column;
       }
-      .video {
+      .video-container {
         flex: 1;
+        position: relative;
+        overflow: hidden;
         border-radius: 8px;
-        border: 2px dashed #30363d;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        border: 2px solid #30363d;
         background: #0d1117;
-        color: #6e7681;
-        font-size: 14px;
         min-height: 200px;
+      }
+      .video-container iframe {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
       }
       .controls-section {
         background: #161b22;
@@ -190,37 +196,6 @@
         color: #58a6ff;
         font-weight: 600;
       }
-      .toggle-button {
-        padding: 12px 24px;
-        font-size: 14px;
-        font-weight: 600;
-        border: 2px solid #30363d;
-        border-radius: 8px;
-        background: #161b22;
-        color: #e6edf3;
-        cursor: pointer;
-        transition: all 0.2s;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        user-select: none;
-      }
-      .toggle-button:hover {
-        background: #21262d;
-        border-color: #444c56;
-      }
-      .toggle-button.active {
-        background: linear-gradient(135deg, #2ea043 0%, #1f6e2e 100%);
-        border-color: #3fb950;
-        color: #fff;
-        box-shadow: 0 2px 8px rgba(62, 185, 80, 0.3);
-      }
-      .toggle-button:active {
-        transform: scale(0.98);
-      }
-      .toggle-icon {
-        font-size: 18px;
-      }
       .diagnostics-section {
         background: #161b22;
         border: 1px solid #30363d;
@@ -242,6 +217,12 @@
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 12px;
+        margin-bottom: 12px;
+      }
+      .control-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
       }
       .diag-card {
         background: #0d1117;
@@ -252,6 +233,59 @@
         flex-direction: column;
         align-items: center;
         gap: 4px;
+      }
+      .control-card {
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+        transition: all 0.2s;
+        user-select: none;
+      }
+      .control-card:hover {
+        background: #161b22;
+        border-color: #444c56;
+      }
+      .control-card.active {
+        background: #1a2942;
+        border-color: #58a6ff;
+        box-shadow: 0 2px 8px rgba(88, 166, 255, 0.3);
+      }
+      .control-card:active {
+        transform: scale(0.98);
+      }
+      .control-icon {
+        font-size: 18px;
+        color: #8b949e;
+      }
+      .control-card.active .control-icon {
+        color: #58a6ff;
+      }
+      .control-label {
+        font-size: 10px;
+        color: #6e7681;
+        text-transform: uppercase;
+      }
+      .control-card.active .control-label {
+        color: #58a6ff;
+      }
+      .control-card.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+      .joystick.disabled {
+        opacity: 0.4;
+        pointer-events: none;
+      }
+      .knob.disabled {
+        opacity: 0.4;
+        pointer-events: none;
       }
       .diag-label {
         font-size: 10px;
@@ -357,11 +391,12 @@
 
     <div class="main-grid">
       <div class="camera-section">
-        <iframe
-          id="cameraFeed"
-          style="width: 100%; height: 320px; border: 0; border-radius: 10px"
-          allow="autoplay; fullscreen; microphone; camera"
-        ></iframe>
+        <div class="video-container">
+          <iframe
+            id="cameraFeed"
+            allow="autoplay; fullscreen; microphone; camera"
+          ></iframe>
+        </div>
       </div>
 
       <div
@@ -388,6 +423,17 @@
             <div class="diag-value">
               <span id="pingMs">--</span><span class="diag-unit">ms</span>
             </div>
+          </div>
+        </div>
+
+        <div class="control-grid">
+          <div class="control-card" id="headlightBtn">
+            <i class="fa-light fa-lightbulb control-icon"></i>
+            <div class="control-label">Headlight</div>
+          </div>
+          <div class="control-card" id="spectatorBtn">
+            <i class="fa-light fa-eye control-icon"></i>
+            <div class="control-label">Spectator</div>
           </div>
         </div>
       </div>
@@ -556,14 +602,6 @@
             </div>
           </div>
         </div>
-
-        <button
-          class="toggle-button"
-          id="headlightBtn"
-        >
-          <span class="toggle-icon">💡</span>
-          <span>Headlight</span>
-        </button>
       </div>
     </div>
 

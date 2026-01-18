@@ -45,6 +45,7 @@ let spinZonePercent = parseFloat(localStorage.getItem('spinZone') || '15');
 let forwardTrim = parseInt(localStorage.getItem('forwardTrim') || '0');
 let reverseTrim = parseInt(localStorage.getItem('reverseTrim') || '0');
 let headlightOn = false;
+let spectatorMode = false;
 
 const SEND_HZ = 25;
 const MAX_RECONNECT_DELAY = 5000;
@@ -152,7 +153,11 @@ function updateJoystickFromMotors(left, right) {
 function tick() {
   let left, right;
   
-  if (joystickActive) {
+  if (spectatorMode) {
+    // In spectator mode, don't send any commands
+    left = 0;
+    right = 0;
+  } else if (joystickActive) {
     left = joystickLeft;
     right = joystickRight;
   } else {
@@ -161,7 +166,11 @@ function tick() {
   }
   
   updateUI(left, right);
-  send(`M ${left} ${right}`);
+  
+  // Only send commands if not in spectator mode
+  if (!spectatorMode) {
+    send(`M ${left} ${right}`);
+  }
   
   setTimeout(tick, 1000 / SEND_HZ);
 }
@@ -185,7 +194,7 @@ function updateJoystickRect() {
 }
 
 function handleJoystickMove(clientX, clientY) {
-  if (!isDragging) return;
+  if (!isDragging || spectatorMode) return;
 
   // Calculate offset from center
   let dx = clientX - joystickCenterX;
@@ -278,6 +287,7 @@ function resetJoystick() {
 
 // Mouse events
 joystickHandle.addEventListener("mousedown", (e) => {
+  if (spectatorMode) return;
   e.preventDefault();
   isDragging = true;
   updateJoystickRect();
@@ -297,6 +307,7 @@ window.addEventListener("mouseup", () => {
 
 // Touch events
 joystickHandle.addEventListener("touchstart", (e) => {
+  if (spectatorMode) return;
   e.preventDefault();
   isDragging = true;
   updateJoystickRect();
@@ -325,7 +336,7 @@ window.addEventListener("touchcancel", () => {
 
 // Pointer events for better cross-device support
 joystickHandle.addEventListener("pointerdown", (e) => {
-  if (e.pointerType === "mouse") return; // Already handled by mouse events
+  if (e.pointerType === "mouse" || spectatorMode) return; // Already handled by mouse events
   e.preventDefault();
   isDragging = true;
   updateJoystickRect();
@@ -467,7 +478,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   }
   
   function handleMove(e) {
-    if (!isDragging) return;
+    if (!isDragging || spectatorMode) return;
     
     const currentAngle = getAngleFromEvent(e);
     let angleDelta = currentAngle - startAngle;
@@ -484,6 +495,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   }
   
   knobEl.addEventListener('mousedown', (e) => {
+    if (spectatorMode) return;
     e.preventDefault();
     isDragging = true;
     startAngle = getAngleFromEvent(e);
@@ -499,6 +511,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   });
   
   knobEl.addEventListener('touchstart', (e) => {
+    if (spectatorMode) return;
     e.preventDefault();
     isDragging = true;
     const touch = e.touches[0];
@@ -617,15 +630,55 @@ setupKnob(
 
 // Headlight control
 const headlightBtn = document.getElementById('headlightBtn');
+const headlightIcon = headlightBtn?.querySelector('.control-icon');
 
 if (headlightBtn) {
   headlightBtn.addEventListener('click', () => {
+    if (spectatorMode) return;
     headlightOn = !headlightOn;
     if (headlightOn) {
       headlightBtn.classList.add('active');
+      if (headlightIcon) {
+        headlightIcon.classList.remove('fa-lightbulb');
+        headlightIcon.classList.add('fa-lightbulb-on');
+      }
     } else {
       headlightBtn.classList.remove('active');
+      if (headlightIcon) {
+        headlightIcon.classList.remove('fa-lightbulb-on');
+        headlightIcon.classList.add('fa-lightbulb');
+      }
     }
     send(`H ${headlightOn ? 1 : 0}`);
+  });
+}
+
+// Spectator mode control
+const spectatorBtn = document.getElementById('spectatorBtn');
+const spectatorIcon = spectatorBtn?.querySelector('.control-icon');
+const allKnobs = document.querySelectorAll('.knob');
+
+function updateSpectatorMode() {
+  if (spectatorMode) {
+    spectatorBtn?.classList.add('active');
+    headlightBtn?.classList.add('disabled');
+    joystick?.classList.add('disabled');
+    allKnobs.forEach(knob => knob.classList.add('disabled'));
+    
+    // Reset joystick and send stop command
+    resetJoystick();
+    send('S');
+  } else {
+    spectatorBtn?.classList.remove('active');
+    headlightBtn?.classList.remove('disabled');
+    joystick?.classList.remove('disabled');
+    allKnobs.forEach(knob => knob.classList.remove('disabled'));
+  }
+}
+
+if (spectatorBtn) {
+  spectatorBtn.addEventListener('click', () => {
+    spectatorMode = !spectatorMode;
+    updateSpectatorMode();
   });
 }
