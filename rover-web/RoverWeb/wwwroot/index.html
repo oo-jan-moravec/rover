@@ -190,6 +190,37 @@
         color: #58a6ff;
         font-weight: 600;
       }
+      .toggle-button {
+        padding: 12px 24px;
+        font-size: 14px;
+        font-weight: 600;
+        border: 2px solid #30363d;
+        border-radius: 8px;
+        background: #161b22;
+        color: #e6edf3;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        user-select: none;
+      }
+      .toggle-button:hover {
+        background: #21262d;
+        border-color: #444c56;
+      }
+      .toggle-button.active {
+        background: linear-gradient(135deg, #2ea043 0%, #1f6e2e 100%);
+        border-color: #3fb950;
+        color: #fff;
+        box-shadow: 0 2px 8px rgba(62, 185, 80, 0.3);
+      }
+      .toggle-button:active {
+        transform: scale(0.98);
+      }
+      .toggle-icon {
+        font-size: 18px;
+      }
       .diagnostics-section {
         background: #161b22;
         border: 1px solid #30363d;
@@ -525,6 +556,14 @@
             </div>
           </div>
         </div>
+
+        <button
+          class="toggle-button"
+          id="headlightBtn"
+        >
+          <span class="toggle-icon">💡</span>
+          <span>Headlight</span>
+        </button>
       </div>
     </div>
 

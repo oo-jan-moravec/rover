@@ -44,6 +44,7 @@ let turnThresholdPercent = parseFloat(localStorage.getItem('turnThreshold') || '
 let spinZonePercent = parseFloat(localStorage.getItem('spinZone') || '15');
 let forwardTrim = parseInt(localStorage.getItem('forwardTrim') || '0');
 let reverseTrim = parseInt(localStorage.getItem('reverseTrim') || '0');
+let headlightOn = false;
 
 const SEND_HZ = 25;
 const MAX_RECONNECT_DELAY = 5000;
@@ -613,3 +614,18 @@ setupKnob(
     return rounded > 0 ? `+${rounded}` : rounded.toString();
   }
 );
+
+// Headlight control
+const headlightBtn = document.getElementById('headlightBtn');
+
+if (headlightBtn) {
+  headlightBtn.addEventListener('click', () => {
+    headlightOn = !headlightOn;
+    if (headlightOn) {
+      headlightBtn.classList.add('active');
+    } else {
+      headlightBtn.classList.remove('active');
+    }
+    send(`H ${headlightOn ? 1 : 0}`);
+  });
+}

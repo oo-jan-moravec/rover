@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Device.Gpio;
 using System.IO.Ports;
 using System.Net.WebSockets;
 using System.Text;
@@ -6,6 +7,7 @@ using System.Text;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
 builder.Services.AddSingleton<WebSocketManager>();
+builder.Services.AddSingleton<GpioController>();
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
 
@@ -16,7 +18,7 @@ app.UseStaticFiles();
 
 app.UseWebSockets();
 
-app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager) =>
+app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, GpioController gpio) =>
 {
     if (!ctx.WebSockets.IsWebSocketRequest)
     {
@@ -53,6 +55,14 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                     int.TryParse(parts[2], out var r))
                 {
                     state.Set(Clamp(l), Clamp(r));
+                }
+            }
+            else if (msg.StartsWith("H "))
+            {
+                var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 2 && int.TryParse(parts[1], out var state_val))
+                {
+                    gpio.SetHeadlight(state_val == 1);
                 }
             }
         }
@@ -247,6 +257,76 @@ sealed class SerialPump : BackgroundService
     }
 }
 
+sealed class GpioController : IDisposable
+{
+    private const int HeadlightPin = 4;
+    private System.Device.Gpio.GpioController? _controller;
+    private bool _gpioAvailable = false;
+    private bool _headlightState = false;
+    private readonly ILogger<GpioController>? _logger;
+
+    public GpioController(ILogger<GpioController>? logger = null)
+    {
+        _logger = logger;
+
+        try
+        {
+            _controller = new System.Device.Gpio.GpioController();
+            _controller.OpenPin(HeadlightPin, PinMode.Output);
+            _controller.Write(HeadlightPin, PinValue.Low);
+            _gpioAvailable = true;
+            _logger?.LogInformation($"GPIO initialized successfully. Pin {HeadlightPin} set to output.");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "GPIO not available, headlight control disabled");
+            _gpioAvailable = false;
+            _controller?.Dispose();
+            _controller = null;
+        }
+    }
+
+    public void SetHeadlight(bool on)
+    {
+        _headlightState = on;
+
+        if (!_gpioAvailable || _controller == null)
+        {
+            _logger?.LogWarning("GPIO not available, cannot set headlight");
+            return;
+        }
+
+        try
+        {
+            var pinValue = on ? PinValue.High : PinValue.Low;
+            _controller.Write(HeadlightPin, pinValue);
+            _logger?.LogInformation($"Headlight turned {(on ? "ON" : "OFF")} (GPIO {HeadlightPin} = {(on ? "HIGH" : "LOW")})");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to set GPIO");
+        }
+    }
+
+    public bool GetHeadlightState() => _headlightState;
+
+    public void Dispose()
+    {
+        if (_gpioAvailable && _controller != null)
+        {
+            try
+            {
+                // Turn off headlight
+                _controller.Write(HeadlightPin, PinValue.Low);
+                _controller.ClosePin(HeadlightPin);
+            }
+            catch { }
+
+            _controller?.Dispose();
+        }
+    }
+}
+
 sealed class DiagnosticsPump : BackgroundService
 {
     private readonly WebSocketManager _wsManager;
@@ -261,7 +341,7 @@ sealed class DiagnosticsPump : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var ping = new System.Net.NetworkInformation.Ping();
-        
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
