@@ -525,6 +525,103 @@
         font-weight: 700;
         color: #58a6ff;
       }
+      .diag-value-small {
+        font-size: 12px;
+        word-break: break-all;
+      }
+      /* Wi-Fi Safety State Banner */
+      .wifi-state-banner {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        background: rgba(46, 160, 67, 0.15);
+        border: 1px solid #2ea043;
+        transition: all 0.3s ease;
+      }
+      .wifi-state-banner.ok {
+        background: rgba(46, 160, 67, 0.15);
+        border-color: #2ea043;
+      }
+      .wifi-state-banner.ok .wifi-state-icon {
+        color: #3fb950;
+      }
+      .wifi-state-banner.degraded {
+        background: rgba(210, 153, 34, 0.2);
+        border-color: #d29922;
+      }
+      .wifi-state-banner.degraded .wifi-state-icon {
+        color: #e3b341;
+      }
+      .wifi-state-banner.roaming {
+        background: rgba(227, 116, 50, 0.2);
+        border-color: #e37432;
+        animation: pulse-roaming 1s ease-in-out infinite;
+      }
+      .wifi-state-banner.roaming .wifi-state-icon {
+        color: #f0883e;
+      }
+      @keyframes pulse-roaming {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+      }
+      .wifi-state-banner.offline {
+        background: rgba(248, 81, 73, 0.2);
+        border-color: #f85149;
+      }
+      .wifi-state-banner.offline .wifi-state-icon {
+        color: #f85149;
+      }
+      .wifi-state-icon {
+        font-size: 24px;
+        width: 32px;
+        text-align: center;
+      }
+      .wifi-state-info {
+        flex: 1;
+      }
+      .wifi-state-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: #f0f6fc;
+      }
+      .wifi-state-detail {
+        font-size: 11px;
+        color: #8b949e;
+        margin-top: 2px;
+      }
+      /* Motor inhibition overlay on joystick */
+      .motor-inhibited-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(248, 81, 73, 0.3);
+        border-radius: 50%;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 8px;
+        z-index: 50;
+        pointer-events: none;
+      }
+      .motor-inhibited-overlay.visible {
+        display: flex;
+      }
+      .motor-inhibited-icon {
+        font-size: 48px;
+        color: #f85149;
+      }
+      .motor-inhibited-text {
+        font-size: 14px;
+        font-weight: 600;
+        color: #f85149;
+        text-transform: uppercase;
+      }
       .diag-unit {
         font-size: 10px;
         color: #6e7681;
@@ -702,6 +799,17 @@
       ></div>
 
       <div class="diagnostics-section">
+        <!-- Wi-Fi Safety State Indicator -->
+        <div class="wifi-state-banner" id="wifiStateBanner">
+          <div class="wifi-state-icon">
+            <i class="fa-light fa-wifi" id="wifiStateIcon"></i>
+          </div>
+          <div class="wifi-state-info">
+            <div class="wifi-state-label" id="wifiStateLabel">Connecting...</div>
+            <div class="wifi-state-detail" id="wifiStateDetail"></div>
+          </div>
+        </div>
+
         <div class="diag-grid">
           <div class="diag-card">
             <div class="diag-label">CPU Temp</div>
@@ -710,9 +818,9 @@
             </div>
           </div>
           <div class="diag-card">
-            <div class="diag-label">WiFi</div>
+            <div class="diag-label">RSSI</div>
             <div class="diag-value">
-              <span id="wifiSignal">--</span><span class="diag-unit">%</span>
+              <span id="wifiRssi">--</span><span class="diag-unit">dBm</span>
             </div>
           </div>
           <div class="diag-card">
@@ -720,6 +828,23 @@
             <div class="diag-value">
               <span id="pingMs">--</span><span class="diag-unit">ms</span>
             </div>
+          </div>
+        </div>
+        
+        <div class="diag-grid">
+          <div class="diag-card">
+            <div class="diag-label">BSSID</div>
+            <div class="diag-value diag-value-small" id="wifiBssid">--:--:--</div>
+          </div>
+          <div class="diag-card">
+            <div class="diag-label">Freq</div>
+            <div class="diag-value">
+              <span id="wifiFreq">--</span><span class="diag-unit">MHz</span>
+            </div>
+          </div>
+          <div class="diag-card">
+            <div class="diag-label">TX/RX</div>
+            <div class="diag-value diag-value-small" id="wifiBitrate">--/--</div>
           </div>
         </div>
 
@@ -741,6 +866,10 @@
             class="joystick-handle"
             id="joystick-handle"
           ></div>
+          <div class="motor-inhibited-overlay" id="motorInhibitedOverlay">
+            <i class="fa-light fa-hand motor-inhibited-icon"></i>
+            <div class="motor-inhibited-text" id="motorInhibitedText">STOPPED</div>
+          </div>
         </div>
 
         <div class="motor-values">
@@ -898,6 +1027,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=1.0.0"></script>
+    <script src="/app.js?v=1.1.0"></script>
   </body>
 </html>

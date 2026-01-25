@@ -1,4 +1,4 @@
-const CLIENT_VERSION = "1.0.0";
+const CLIENT_VERSION = "1.1.0"; // Bumped for Wi-Fi safety features
 
 const statusEl = document.getElementById("status");
 const leftValueEl = document.getElementById("leftValue");
@@ -6,8 +6,24 @@ const rightValueEl = document.getElementById("rightValue");
 
 // Diagnostic elements
 const cpuTempEl = document.getElementById("cpuTemp");
-const wifiSignalEl = document.getElementById("wifiSignal");
+const wifiRssiEl = document.getElementById("wifiRssi");
 const pingMsEl = document.getElementById("pingMs");
+const wifiBssidEl = document.getElementById("wifiBssid");
+const wifiFreqEl = document.getElementById("wifiFreq");
+const wifiBitrateEl = document.getElementById("wifiBitrate");
+
+// Wi-Fi state elements
+const wifiStateBanner = document.getElementById("wifiStateBanner");
+const wifiStateIcon = document.getElementById("wifiStateIcon");
+const wifiStateLabel = document.getElementById("wifiStateLabel");
+const wifiStateDetail = document.getElementById("wifiStateDetail");
+const motorInhibitedOverlay = document.getElementById("motorInhibitedOverlay");
+const motorInhibitedText = document.getElementById("motorInhibitedText");
+
+// Wi-Fi safety state tracking
+let wifiState = "OFFLINE";
+let motorsInhibited = false;
+let lastStopReason = "";
 
 // Knob elements
 const maxVelValueEl = document.getElementById("maxVelValue");
@@ -73,6 +89,154 @@ function checkConnection() {
   }
 }
 
+// Handle new telemetry format from backend
+function handleTelemetry(telem) {
+  // Update Wi-Fi state
+  if (telem.wifi) {
+    wifiState = telem.wifi.state || "OFFLINE";
+    
+    // Update RSSI display
+    if (wifiRssiEl) {
+      wifiRssiEl.textContent = telem.wifi.rssiDbm || "--";
+    }
+    
+    // Update BSSID display (shortened)
+    if (wifiBssidEl) {
+      const bssid = telem.wifi.bssid || "";
+      // Show last 8 chars for readability
+      wifiBssidEl.textContent = bssid ? bssid.slice(-8) : "--:--:--";
+    }
+    
+    // Update frequency
+    if (wifiFreqEl) {
+      wifiFreqEl.textContent = telem.wifi.freqMhz || "--";
+    }
+    
+    // Update bitrates
+    if (wifiBitrateEl) {
+      const tx = telem.wifi.txBitrateMbps ? Math.round(telem.wifi.txBitrateMbps) : "--";
+      const rx = telem.wifi.rxBitrateMbps ? Math.round(telem.wifi.rxBitrateMbps) : "--";
+      wifiBitrateEl.textContent = `${tx}/${rx}`;
+    }
+    
+    // Update Wi-Fi state banner
+    updateWifiStateBanner(wifiState, telem.wifi.rssiDbm, telem.wifi.bssid);
+  }
+  
+  // Update motor inhibition state
+  if (telem.motors) {
+    motorsInhibited = telem.motors.inhibited || false;
+    lastStopReason = telem.motors.lastStopReason || "";
+    updateMotorInhibitDisplay();
+  }
+  
+  // Update system diagnostics
+  if (telem.system) {
+    if (cpuTempEl && telem.system.cpuTempC !== undefined) {
+      cpuTempEl.textContent = telem.system.cpuTempC.toFixed(1);
+    }
+    if (pingMsEl) {
+      pingMsEl.textContent = telem.system.pingMs === -1 ? "ERR" : telem.system.pingMs;
+    }
+  }
+}
+
+// Update the Wi-Fi state banner based on current state
+function updateWifiStateBanner(state, rssi, bssid) {
+  if (!wifiStateBanner) return;
+  
+  // Remove all state classes
+  wifiStateBanner.classList.remove('ok', 'degraded', 'roaming', 'offline');
+  
+  // Update icon
+  if (wifiStateIcon) {
+    wifiStateIcon.classList.remove('fa-wifi', 'fa-wifi-slash', 'fa-wifi-exclamation', 'fa-spinner', 'fa-spin');
+  }
+  
+  switch (state) {
+    case 'OK':
+      wifiStateBanner.classList.add('ok');
+      if (wifiStateIcon) {
+        wifiStateIcon.classList.add('fa-wifi');
+      }
+      if (wifiStateLabel) {
+        wifiStateLabel.textContent = 'Wi-Fi OK';
+      }
+      if (wifiStateDetail) {
+        wifiStateDetail.textContent = `${rssi} dBm • ${bssid ? bssid.slice(-8) : 'Connected'}`;
+      }
+      break;
+      
+    case 'DEGRADED':
+      wifiStateBanner.classList.add('degraded');
+      if (wifiStateIcon) {
+        wifiStateIcon.classList.add('fa-wifi-exclamation');
+      }
+      if (wifiStateLabel) {
+        wifiStateLabel.textContent = 'Wi-Fi Weak';
+      }
+      if (wifiStateDetail) {
+        wifiStateDetail.textContent = `${rssi} dBm • Signal degraded`;
+      }
+      break;
+      
+    case 'ROAMING':
+      wifiStateBanner.classList.add('roaming');
+      if (wifiStateIcon) {
+        wifiStateIcon.classList.add('fa-spinner', 'fa-spin');
+      }
+      if (wifiStateLabel) {
+        wifiStateLabel.textContent = 'Switching AP...';
+      }
+      if (wifiStateDetail) {
+        wifiStateDetail.textContent = 'Rover stopped for safety';
+      }
+      break;
+      
+    case 'OFFLINE':
+    default:
+      wifiStateBanner.classList.add('offline');
+      if (wifiStateIcon) {
+        wifiStateIcon.classList.add('fa-wifi-slash');
+      }
+      if (wifiStateLabel) {
+        wifiStateLabel.textContent = 'Disconnected';
+      }
+      if (wifiStateDetail) {
+        wifiStateDetail.textContent = 'Rover stopped';
+      }
+      break;
+  }
+}
+
+// Update motor inhibition display
+function updateMotorInhibitDisplay() {
+  if (!motorInhibitedOverlay) return;
+  
+  if (motorsInhibited && isOperator) {
+    motorInhibitedOverlay.classList.add('visible');
+    
+    // Update the reason text
+    if (motorInhibitedText) {
+      switch (lastStopReason) {
+        case 'roaming':
+          motorInhibitedText.textContent = 'STOPPED - AP SWITCH';
+          break;
+        case 'offline':
+          motorInhibitedText.textContent = 'STOPPED - OFFLINE';
+          break;
+        case 'watchdog':
+          motorInhibitedText.textContent = 'STOPPED - WATCHDOG';
+          break;
+        default:
+          motorInhibitedText.textContent = 'STOPPED';
+      }
+    }
+  } else {
+    motorInhibitedOverlay.classList.remove('visible');
+  }
+}
+
 function connect() {
   // Clear any existing timers
   if (reconnectTimer) {
@@ -110,6 +274,13 @@ function connect() {
         pingInterval = null;
       }
       
+      // Emergency: Set to OFFLINE state immediately on disconnect
+      wifiState = "OFFLINE";
+      motorsInhibited = true;
+      lastStopReason = "offline";
+      updateWifiStateBanner("OFFLINE", -100, "");
+      updateMotorInhibitDisplay();
+      
       const delay = Math.min(500 * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
       reconnectAttempts++;
       statusEl.textContent = `WS: disconnected (retry ${reconnectAttempts} in ${(delay/1000).toFixed(1)}s)`;
@@ -145,11 +316,20 @@ function connect() {
       } else if (msg === "VERSION_OK") {
         console.log("Version check passed");
         return;
+      } else if (msg.startsWith("TELEM:")) {
+        // New telemetry format with full Wi-Fi state
+        try {
+          const telem = JSON.parse(msg.substring(6));
+          handleTelemetry(telem);
+        } catch (e) {
+          console.error("Failed to parse telemetry:", e);
+        }
+        return;
       } else if (msg.startsWith("DIAG:")) {
+        // Legacy format - still update basic fields
         const data = msg.substring(5).split('|');
         if (data.length === 3) {
           if (cpuTempEl) cpuTempEl.textContent = data[0];
-          if (wifiSignalEl) wifiSignalEl.textContent = data[1];
           if (pingMsEl) pingMsEl.textContent = data[2] === "-1" ? "ERR" : data[2];
         }
       } else if (msg.startsWith("NAME:")) {
@@ -224,6 +404,10 @@ function tick() {
     // Not operator - don't send any commands
     left = 0;
     right = 0;
+  } else if (motorsInhibited) {
+    // Motors inhibited by backend - show 0 but still send commands (backend will ignore)
+    left = 0;
+    right = 0;
   } else if (joystickActive) {
     left = joystickLeft;
     right = joystickRight;
@@ -235,6 +419,7 @@ function tick() {
   updateUI(left, right);
   
   // Only send commands if we are the operator
+  // Backend will ignore these if motors are inhibited
   if (isOperator) {
     send(`M ${left} ${right}`);
   }
@@ -803,11 +988,14 @@ function updateRoleUI() {
       requestOverlay?.classList.remove('visible');
     }
     
-    // Enable controls
+    // Enable controls (unless motors are inhibited)
     headlightBtn?.classList.remove('disabled');
     joystick?.classList.remove('disabled');
     joystickHandle?.classList.remove('disabled');
     allKnobs.forEach(knob => knob.classList.remove('disabled'));
+    
+    // Update motor inhibit overlay
+    updateMotorInhibitDisplay();
   } else {
     // We are a spectator
     roleStatusEl?.classList.remove('operator');
