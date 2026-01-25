@@ -84,20 +84,20 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
     try
     {
         var buffer = new byte[256];
-        
+
         // Wait for version handshake first
         var versionResult = await ws.ReceiveAsync(buffer, CancellationToken.None);
         if (versionResult.MessageType == WebSocketMessageType.Close) return;
-        
+
         var versionMsg = Encoding.UTF8.GetString(buffer, 0, versionResult.Count).Trim();
-        
+
         if (!versionMsg.StartsWith("VERSION:"))
         {
             // No version provided - outdated client
             await wsManager.SendToClientAsync(clientId, $"VERSION_MISMATCH:{CLIENT_VERSION}");
             return;
         }
-        
+
         var clientVersion = versionMsg.Substring(8);
         if (clientVersion != CLIENT_VERSION)
         {
@@ -105,7 +105,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
             await wsManager.SendToClientAsync(clientId, $"VERSION_MISMATCH:{CLIENT_VERSION}");
             return;
         }
-        
+
         // Version OK - continue with normal setup
         await wsManager.SendToClientAsync(clientId, "VERSION_OK");
         await wsManager.SendToClientAsync(clientId, $"NAME:{clientName}");
@@ -189,7 +189,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                         // The state machine already set motors to 0
                         continue;
                     }
-                    
+
                     var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length == 3 &&
                         int.TryParse(parts[1], out var l) &&
@@ -231,7 +231,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
         var wasOperator = opManager.IsOperator(clientId);
         opManager.UnregisterClient(clientId);
         wsManager.RemoveClient(clientId);
-        
+
         // If operator disconnected, notify all clients
         if (wasOperator)
         {
@@ -241,7 +241,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                 await SendRoleStatus(id);
             }
         }
-        
+
         try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); }
         catch { /* ignore */ }
     }
@@ -252,13 +252,51 @@ app.Run("http://0.0.0.0:8080");
 static int Clamp(int v) => Math.Max(-255, Math.Min(255, v));
 
 /// <summary>
-/// Trigger a Wi-Fi rescan and roam to the best available AP
+/// Trigger a Wi-Fi interface restart, rescan, and roam to the best available AP
 /// </summary>
 static async Task<string> TriggerRescanAndRoamAsync()
 {
     try
     {
-        // Trigger scan
+        // Step 1: Restart the Wi-Fi interface to force a fresh scan
+        // This clears any driver state issues and finds all APs
+        var downPsi = new ProcessStartInfo
+        {
+            FileName = "/usr/sbin/ifconfig",
+            Arguments = "wlan0 down",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using (var downProcess = Process.Start(downPsi))
+        {
+            if (downProcess != null)
+                await downProcess.WaitForExitAsync();
+        }
+
+        await Task.Delay(1500); // Wait for interface to go down
+
+        var upPsi = new ProcessStartInfo
+        {
+            FileName = "/usr/sbin/ifconfig",
+            Arguments = "wlan0 up",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using (var upProcess = Process.Start(upPsi))
+        {
+            if (upProcess != null)
+                await upProcess.WaitForExitAsync();
+        }
+
+        await Task.Delay(3000); // Wait for interface to reconnect
+
+        // Step 2: Trigger scan
         var scanPsi = new ProcessStartInfo
         {
             FileName = "/usr/sbin/wpa_cli",
@@ -267,15 +305,15 @@ static async Task<string> TriggerRescanAndRoamAsync()
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        
+
         using (var scanProcess = Process.Start(scanPsi))
         {
             if (scanProcess != null)
                 await scanProcess.WaitForExitAsync();
         }
-        
-        await Task.Delay(1500); // Wait for scan to complete
-        
+
+        await Task.Delay(2000); // Wait for scan to complete
+
         // Get current connection info
         var linkPsi = new ProcessStartInfo
         {
@@ -285,32 +323,32 @@ static async Task<string> TriggerRescanAndRoamAsync()
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        
+
         string currentBssid = "";
         string currentSsid = "";
         int currentRssi = -100;
-        
+
         using (var linkProcess = Process.Start(linkPsi))
         {
             if (linkProcess != null)
             {
                 var linkOutput = await linkProcess.StandardOutput.ReadToEndAsync();
                 await linkProcess.WaitForExitAsync();
-                
+
                 var bssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"Connected to ([0-9a-fA-F:]+)");
                 if (bssidMatch.Success)
                     currentBssid = bssidMatch.Groups[1].Value.ToUpper();
-                
+
                 var ssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"SSID: (.+)");
                 if (ssidMatch.Success)
                     currentSsid = ssidMatch.Groups[1].Value.Trim();
-                
+
                 var signalMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"signal: (-?\d+)");
                 if (signalMatch.Success && int.TryParse(signalMatch.Groups[1].Value, out var rssi))
                     currentRssi = rssi;
             }
         }
-        
+
         // Get scan results
         var resultsPsi = new ProcessStartInfo
         {
@@ -320,17 +358,17 @@ static async Task<string> TriggerRescanAndRoamAsync()
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        
+
         string bestBssid = "";
         int bestRssi = -100;
-        
+
         using (var resultsProcess = Process.Start(resultsPsi))
         {
             if (resultsProcess != null)
             {
                 var resultsOutput = await resultsProcess.StandardOutput.ReadToEndAsync();
                 await resultsProcess.WaitForExitAsync();
-                
+
                 var lines = resultsOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
                 foreach (var line in lines.Skip(1))
                 {
@@ -338,12 +376,12 @@ static async Task<string> TriggerRescanAndRoamAsync()
                     if (parts.Length >= 4)
                     {
                         var ssid = parts.Length >= 5 ? parts[4].Trim() : "";
-                        
+
                         // Only consider APs with same SSID or empty SSID (mesh nodes)
-                        if (!string.IsNullOrEmpty(currentSsid) && 
+                        if (!string.IsNullOrEmpty(currentSsid) &&
                             ssid != currentSsid && !string.IsNullOrEmpty(ssid))
                             continue;
-                        
+
                         if (int.TryParse(parts[2], out var apRssi) && apRssi > bestRssi)
                         {
                             bestRssi = apRssi;
@@ -353,23 +391,23 @@ static async Task<string> TriggerRescanAndRoamAsync()
                 }
             }
         }
-        
+
         // Check if we should roam
         if (string.IsNullOrEmpty(bestBssid))
         {
             return "no_aps_found";
         }
-        
+
         if (bestBssid.Equals(currentBssid, StringComparison.OrdinalIgnoreCase))
         {
             return $"already_best:{bestRssi}";
         }
-        
+
         if (bestRssi <= currentRssi + 3) // Need at least 3dB improvement
         {
             return $"no_better_ap:{currentRssi}:{bestRssi}";
         }
-        
+
         // Roam to best AP
         var roamPsi = new ProcessStartInfo
         {
@@ -379,14 +417,14 @@ static async Task<string> TriggerRescanAndRoamAsync()
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        
+
         using (var roamProcess = Process.Start(roamPsi))
         {
             if (roamProcess != null)
             {
                 var roamOutput = await roamProcess.StandardOutput.ReadToEndAsync();
                 await roamProcess.WaitForExitAsync();
-                
+
                 if (roamOutput.Contains("OK"))
                 {
                     return $"roamed:{bestBssid}:{bestRssi}";
@@ -397,7 +435,7 @@ static async Task<string> TriggerRescanAndRoamAsync()
                 }
             }
         }
-        
+
         return "unknown_error";
     }
     catch (Exception ex)
@@ -527,7 +565,7 @@ sealed class OperatorManager
     private readonly object _lock = new();
     private readonly ConcurrentDictionary<Guid, string> _clientNames = new();
     private int _nextPilotNumber = 1;
-    
+
     private Guid? _currentOperatorId;
     private Guid? _pendingRequestId;
     private readonly ILogger<OperatorManager>? _logger;
@@ -548,7 +586,7 @@ sealed class OperatorManager
     public void UnregisterClient(Guid clientId)
     {
         _clientNames.TryRemove(clientId, out _);
-        
+
         lock (_lock)
         {
             if (_currentOperatorId == clientId)
@@ -608,7 +646,7 @@ sealed class OperatorManager
         lock (_lock)
         {
             operatorId = _currentOperatorId;
-            
+
             if (_currentOperatorId == null)
             {
                 // No operator, auto-grant
@@ -616,20 +654,20 @@ sealed class OperatorManager
                 _logger?.LogInformation($"No operator, auto-granting to {clientId}");
                 return true;
             }
-            
+
             if (_currentOperatorId == clientId)
             {
                 // Already operator
                 return true;
             }
-            
+
             if (_pendingRequestId != null)
             {
                 // Already a pending request
                 _logger?.LogInformation($"Request from {clientId} rejected - already pending request from {_pendingRequestId}");
                 return false;
             }
-            
+
             _pendingRequestId = clientId;
             _logger?.LogInformation($"Control request from {clientId} pending for operator {_currentOperatorId}");
             return false;
@@ -645,18 +683,18 @@ sealed class OperatorManager
                 _logger?.LogWarning($"Accept from non-operator {operatorId}");
                 return (false, null, null);
             }
-            
+
             if (_pendingRequestId == null)
             {
                 _logger?.LogWarning($"Accept but no pending request");
                 return (false, null, null);
             }
-            
+
             var oldOperator = _currentOperatorId;
             var newOperator = _pendingRequestId.Value;
             _currentOperatorId = newOperator;
             _pendingRequestId = null;
-            
+
             _logger?.LogInformation($"Control transferred from {oldOperator} to {newOperator}");
             return (true, newOperator, oldOperator);
         }
@@ -671,16 +709,16 @@ sealed class OperatorManager
                 _logger?.LogWarning($"Deny from non-operator {operatorId}");
                 return (false, null);
             }
-            
+
             if (_pendingRequestId == null)
             {
                 _logger?.LogWarning($"Deny but no pending request");
                 return (false, null);
             }
-            
+
             var requesterId = _pendingRequestId.Value;
             _pendingRequestId = null;
-            
+
             _logger?.LogInformation($"Request from {requesterId} denied by {operatorId}");
             return (true, requesterId);
         }
@@ -695,7 +733,7 @@ sealed class OperatorManager
                 _logger?.LogWarning($"Release from non-operator {operatorId}");
                 return false;
             }
-            
+
             _logger?.LogInformation($"Operator {operatorId} released control");
             _currentOperatorId = null;
             _pendingRequestId = null; // Clear any pending request
@@ -922,7 +960,7 @@ enum SafetyState
 sealed class WifiState
 {
     private readonly object _lock = new();
-    
+
     // Current values
     private int _rssiDbm = -100;
     private string _bssid = "";
@@ -934,23 +972,23 @@ sealed class WifiState
     private DateTime _lastUpdated = DateTime.UtcNow;
     private DateTime _lastRoamAt = DateTime.MinValue;
     private string _previousBssid = "";
-    
+
     // RTT tracking for degraded detection
     private readonly Queue<long> _rttHistory = new();
     private const int RTT_HISTORY_SIZE = 10;
-    
+
     public void Update(int rssiDbm, string bssid, string ssid, int freqMhz, double txMbps, double rxMbps, bool connected)
     {
         lock (_lock)
         {
             // Detect BSSID change (roaming)
-            if (!string.IsNullOrEmpty(_bssid) && !string.IsNullOrEmpty(bssid) && 
+            if (!string.IsNullOrEmpty(_bssid) && !string.IsNullOrEmpty(bssid) &&
                 _bssid != bssid && connected)
             {
                 _previousBssid = _bssid;
                 _lastRoamAt = DateTime.UtcNow;
             }
-            
+
             _rssiDbm = rssiDbm;
             _bssid = bssid ?? "";
             _ssid = ssid ?? "";
@@ -961,7 +999,7 @@ sealed class WifiState
             _lastUpdated = DateTime.UtcNow;
         }
     }
-    
+
     public void AddRttSample(long rttMs)
     {
         lock (_lock)
@@ -971,18 +1009,18 @@ sealed class WifiState
                 _rttHistory.Dequeue();
         }
     }
-    
-    public (int RssiDbm, string Bssid, string Ssid, int FreqMhz, double TxMbps, double RxMbps, 
+
+    public (int RssiDbm, string Bssid, string Ssid, int FreqMhz, double TxMbps, double RxMbps,
             bool IsConnected, DateTime LastUpdated, DateTime LastRoamAt, long AvgRttMs) Get()
     {
         lock (_lock)
         {
             var avgRtt = _rttHistory.Count > 0 ? (long)_rttHistory.Average() : 0;
-            return (_rssiDbm, _bssid, _ssid, _freqMhz, _txBitrateMbps, _rxBitrateMbps, 
+            return (_rssiDbm, _bssid, _ssid, _freqMhz, _txBitrateMbps, _rxBitrateMbps,
                     _isConnected, _lastUpdated, _lastRoamAt, avgRtt);
         }
     }
-    
+
     public bool DetectRoamingInProgress()
     {
         lock (_lock)
@@ -1002,27 +1040,27 @@ sealed class SafetyStateMachine
     private readonly WifiState _wifiState;
     private readonly RoverState _roverState;
     private readonly ILogger<SafetyStateMachine>? _logger;
-    
+
     private SafetyState _currentState = SafetyState.OFFLINE;
     private DateTime _degradedSince = DateTime.MinValue;
     private DateTime _lastStopSentAt = DateTime.MinValue;
     private string _lastStopReason = "startup";
     private bool _motorsInhibited = true; // Start inhibited until we confirm connectivity
-    
+
     // Thresholds from requirements
     private const int RSSI_DEGRADED_THRESHOLD = -67;  // dBm
     private const int RSSI_CRITICAL_THRESHOLD = -72;  // dBm
     private const int RTT_DEGRADED_THRESHOLD = 250;   // ms
     private const double DEGRADED_DURATION_SEC = 2.0;
     private const double STABLE_AFTER_ROAM_SEC = 1.0;
-    
+
     public SafetyStateMachine(WifiState wifiState, RoverState roverState, ILogger<SafetyStateMachine>? logger = null)
     {
         _wifiState = wifiState;
         _roverState = roverState;
         _logger = logger;
     }
-    
+
     /// <summary>
     /// Evaluates current Wi-Fi state and transitions the state machine.
     /// Returns true if a STOP command should be sent to the UNO.
@@ -1035,14 +1073,14 @@ sealed class SafetyStateMachine
             var previousState = _currentState;
             var shouldSendStop = false;
             var stopReason = "";
-            
+
             // Check for stale data (Wi-Fi monitor not responding)
             var dataAge = DateTime.UtcNow - lastUpdate;
             if (dataAge.TotalSeconds > 5)
             {
                 connected = false;
             }
-            
+
             // State transitions
             if (!connected)
             {
@@ -1110,7 +1148,7 @@ sealed class SafetyStateMachine
             {
                 // Good signal - check for recovery
                 _degradedSince = DateTime.MinValue;
-                
+
                 if (_currentState == SafetyState.ROAMING)
                 {
                     // ROAMING → OK: stable connected for 1s after roam
@@ -1127,10 +1165,10 @@ sealed class SafetyStateMachine
                     _logger?.LogInformation($"Safety: Transition to OK - RSSI {rssi} dBm");
                 }
             }
-            
+
             // Update motor inhibition
             _motorsInhibited = _currentState == SafetyState.ROAMING || _currentState == SafetyState.OFFLINE;
-            
+
             // Send stop only once per transition
             if (shouldSendStop && (DateTime.UtcNow - _lastStopSentAt).TotalMilliseconds > 500)
             {
@@ -1139,11 +1177,11 @@ sealed class SafetyStateMachine
                 _roverState.Set(0, 0); // Stop motors in state
                 return (_currentState, true, stopReason);
             }
-            
+
             return (_currentState, false, _lastStopReason);
         }
     }
-    
+
     public (SafetyState State, bool MotorsInhibited, string LastStopReason) GetStatus()
     {
         lock (_lock)
@@ -1151,7 +1189,7 @@ sealed class SafetyStateMachine
             return (_currentState, _motorsInhibited, _lastStopReason);
         }
     }
-    
+
     public bool AreMotorsInhibited()
     {
         lock (_lock) return _motorsInhibited;
@@ -1165,29 +1203,29 @@ sealed class WifiMonitor : BackgroundService
 {
     private readonly WifiState _wifiState;
     private readonly ILogger<WifiMonitor> _logger;
-    
+
     public WifiMonitor(WifiState wifiState, ILogger<WifiMonitor> logger)
     {
         _wifiState = wifiState;
         _logger = logger;
     }
-    
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("WifiMonitor started");
-        
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 var wifiInfo = await GetWifiInfoAsync();
                 _wifiState.Update(
-                    wifiInfo.RssiDbm, 
-                    wifiInfo.Bssid, 
-                    wifiInfo.Ssid, 
-                    wifiInfo.FreqMhz, 
-                    wifiInfo.TxMbps, 
-                    wifiInfo.RxMbps, 
+                    wifiInfo.RssiDbm,
+                    wifiInfo.Bssid,
+                    wifiInfo.Ssid,
+                    wifiInfo.FreqMhz,
+                    wifiInfo.TxMbps,
+                    wifiInfo.RxMbps,
                     wifiInfo.IsConnected
                 );
             }
@@ -1197,15 +1235,15 @@ sealed class WifiMonitor : BackgroundService
                 // Mark as disconnected on error
                 _wifiState.Update(-100, "", "", 0, 0, 0, false);
             }
-            
+
             await Task.Delay(250, stoppingToken); // Update at 4Hz
         }
     }
-    
+
     private async Task<WifiInfo> GetWifiInfoAsync()
     {
         var info = new WifiInfo();
-        
+
         try
         {
             // Use 'iw' command for detailed Wi-Fi info
@@ -1218,46 +1256,46 @@ sealed class WifiMonitor : BackgroundService
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            
+
             using var process = Process.Start(psi);
             if (process != null)
             {
                 var output = await process.StandardOutput.ReadToEndAsync();
                 await process.WaitForExitAsync();
-                
+
                 if (output.Contains("Not connected"))
                 {
                     info.IsConnected = false;
                     return info;
                 }
-                
+
                 info.IsConnected = true;
-                
+
                 // Parse BSSID
                 var bssidMatch = System.Text.RegularExpressions.Regex.Match(output, @"Connected to ([0-9a-fA-F:]+)");
                 if (bssidMatch.Success)
                     info.Bssid = bssidMatch.Groups[1].Value.ToUpper();
-                
+
                 // Parse SSID
                 var ssidMatch = System.Text.RegularExpressions.Regex.Match(output, @"SSID: (.+)");
                 if (ssidMatch.Success)
                     info.Ssid = ssidMatch.Groups[1].Value.Trim();
-                
+
                 // Parse frequency
                 var freqMatch = System.Text.RegularExpressions.Regex.Match(output, @"freq: (\d+)");
                 if (freqMatch.Success && int.TryParse(freqMatch.Groups[1].Value, out var freq))
                     info.FreqMhz = freq;
-                
+
                 // Parse signal strength
                 var signalMatch = System.Text.RegularExpressions.Regex.Match(output, @"signal: (-?\d+)");
                 if (signalMatch.Success && int.TryParse(signalMatch.Groups[1].Value, out var rssi))
                     info.RssiDbm = rssi;
-                
+
                 // Parse TX bitrate
                 var txMatch = System.Text.RegularExpressions.Regex.Match(output, @"tx bitrate: ([\d.]+)");
                 if (txMatch.Success && double.TryParse(txMatch.Groups[1].Value, out var tx))
                     info.TxMbps = tx;
-                
+
                 // Parse RX bitrate
                 var rxMatch = System.Text.RegularExpressions.Regex.Match(output, @"rx bitrate: ([\d.]+)");
                 if (rxMatch.Success && double.TryParse(rxMatch.Groups[1].Value, out var rx))
@@ -1288,10 +1326,10 @@ sealed class WifiMonitor : BackgroundService
             }
             catch { }
         }
-        
+
         return info;
     }
-    
+
     private record WifiInfo
     {
         public int RssiDbm { get; set; } = -100;
@@ -1302,14 +1340,14 @@ sealed class WifiMonitor : BackgroundService
         public double RxMbps { get; set; } = 0;
         public bool IsConnected { get; set; } = false;
     }
-    
+
     /// <summary>
     /// Get list of nearby APs from wpa_cli scan_results (called less frequently)
     /// </summary>
     public async Task<List<NearbyAp>> GetNearbyApsAsync(string currentSsid)
     {
         var aps = new List<NearbyAp>();
-        
+
         try
         {
             // Trigger a scan first
@@ -1321,15 +1359,15 @@ sealed class WifiMonitor : BackgroundService
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            
+
             using (var scanProcess = Process.Start(scanPsi))
             {
                 if (scanProcess != null)
                     await scanProcess.WaitForExitAsync();
             }
-            
+
             await Task.Delay(800); // Wait for scan to complete
-            
+
             // Get scan results
             var psi = new ProcessStartInfo
             {
@@ -1339,13 +1377,13 @@ sealed class WifiMonitor : BackgroundService
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            
+
             using var process = Process.Start(psi);
             if (process != null)
             {
                 var output = await process.StandardOutput.ReadToEndAsync();
                 await process.WaitForExitAsync();
-                
+
                 // Parse: bssid / frequency / signal level / flags / ssid
                 var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
                 foreach (var line in lines.Skip(1)) // Skip header
@@ -1354,14 +1392,14 @@ sealed class WifiMonitor : BackgroundService
                     if (parts.Length >= 4)
                     {
                         var apSsid = parts.Length >= 5 ? parts[4].Trim() : "";
-                        
+
                         // Only include APs with matching SSID or empty SSID (mesh nodes)
                         // Use case-insensitive comparison
-                        if (!string.IsNullOrEmpty(currentSsid) && 
-                            !apSsid.Equals(currentSsid, StringComparison.OrdinalIgnoreCase) && 
+                        if (!string.IsNullOrEmpty(currentSsid) &&
+                            !apSsid.Equals(currentSsid, StringComparison.OrdinalIgnoreCase) &&
                             !string.IsNullOrEmpty(apSsid))
                             continue;
-                        
+
                         if (int.TryParse(parts[2], out var apRssi))
                         {
                             aps.Add(new NearbyAp
@@ -1380,11 +1418,11 @@ sealed class WifiMonitor : BackgroundService
         {
             _logger.LogError(ex, "Error getting nearby APs");
         }
-        
+
         // Sort by signal strength (best first)
         return aps.OrderByDescending(a => a.RssiDbm).Take(5).ToList();
     }
-    
+
     public record NearbyAp
     {
         public string Bssid { get; set; } = "";
@@ -1424,25 +1462,25 @@ sealed class DiagnosticsPump : BackgroundService
             {
                 // Evaluate safety state machine
                 var (safetyState, shouldStop, stopReason) = _safetyMachine.Evaluate();
-                
+
                 var cpuTemp = GetCpuTemp();
-                
+
                 // Only ping every 8th iteration (~2 seconds at 4Hz) to reduce network overhead
                 if (updateCounter % 8 == 0)
                 {
                     lastPingMs = await GetPingAsync(ping);
-                    
+
                     // Add RTT sample for safety state tracking
                     if (lastPingMs > 0)
                     {
                         _wifiState.AddRttSample(lastPingMs);
                     }
                 }
-                
+
                 // Get Wi-Fi state
                 var (rssi, bssid, ssid, freq, txMbps, rxMbps, connected, lastUpdate, lastRoam, avgRtt) = _wifiState.Get();
                 var (_, motorsInhibited, lastStopReason) = _safetyMachine.GetStatus();
-                
+
                 // Scan for nearby APs every ~5 seconds (20 iterations at 4Hz)
                 if (updateCounter % 20 == 0)
                 {
@@ -1455,16 +1493,16 @@ sealed class DiagnosticsPump : BackgroundService
                         _logger.LogError(ex, "Error scanning nearby APs");
                     }
                 }
-                
+
                 // Calculate Wi-Fi signal percentage for backwards compatibility (0-100%)
                 var wifiSignalPercent = connected ? Math.Clamp((int)((rssi + 100) * 100.0 / 70.0), 0, 100) : 0;
-                
+
                 // Check if a better AP is available (not the current one, and significantly stronger)
                 var betterApAvailable = nearbyAps
                     .Where(ap => ap.Bssid != bssid && ap.RssiDbm > rssi + 8)
                     .OrderByDescending(ap => ap.RssiDbm)
                     .FirstOrDefault();
-                
+
                 // Send full telemetry at 2-5 Hz (every 200-500ms), we'll do 4Hz
                 // Format: TELEM:JSON
                 var telemetry = new
@@ -1481,14 +1519,16 @@ sealed class DiagnosticsPump : BackgroundService
                         rxBitrateMbps = rxMbps,
                         lastRoamAt = lastRoam != DateTime.MinValue ? lastRoam.ToString("o") : null,
                         signalPercent = wifiSignalPercent,
-                        nearbyAps = nearbyAps.Select(ap => new { 
-                            bssid = ap.Bssid, 
+                        nearbyAps = nearbyAps.Select(ap => new
+                        {
+                            bssid = ap.Bssid,
                             ssid = ap.Ssid,
                             // Use live RSSI for current AP, scan cache for others
                             rssiDbm = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase) ? rssi : ap.RssiDbm,
                             isCurrent = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase)
                         }),
-                        betterApAvailable = betterApAvailable != null ? new {
+                        betterApAvailable = betterApAvailable != null ? new
+                        {
                             bssid = betterApAvailable.Bssid,
                             rssiDbm = betterApAvailable.RssiDbm,
                             improvement = betterApAvailable.RssiDbm - rssi
@@ -1505,21 +1545,21 @@ sealed class DiagnosticsPump : BackgroundService
                         pingMs = lastPingMs
                     }
                 };
-                
-                var telemJson = JsonSerializer.Serialize(telemetry, new JsonSerializerOptions 
-                { 
+
+                var telemJson = JsonSerializer.Serialize(telemetry, new JsonSerializerOptions
+                {
                     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
                 });
                 await _wsManager.BroadcastAsync($"TELEM:{telemJson}");
-                
+
                 // Also send legacy DIAG format for backwards compatibility
                 if (updateCounter % 4 == 0) // Every ~1 second
                 {
                     var diagMsg = $"DIAG:{cpuTemp:F1}|{wifiSignalPercent}|{lastPingMs}";
                     await _wsManager.BroadcastAsync(diagMsg);
                 }
-                
+
                 updateCounter++;
             }
             catch (Exception ex)

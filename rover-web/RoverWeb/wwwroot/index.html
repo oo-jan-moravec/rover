@@ -1,13 +1,28 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-    <meta http-equiv="Pragma" content="no-cache" />
-    <meta http-equiv="Expires" content="0" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1"
+    />
+    <meta
+      http-equiv="Cache-Control"
+      content="no-cache, no-store, must-revalidate"
+    />
+    <meta
+      http-equiv="Pragma"
+      content="no-cache"
+    />
+    <meta
+      http-equiv="Expires"
+      content="0"
+    />
     <title>Rover Control</title>
-    <script src="https://kit.fontawesome.com/1d4131bbf4.js" crossorigin="anonymous"></script>
+    <script
+      src="https://kit.fontawesome.com/1d4131bbf4.js"
+      crossorigin="anonymous"
+    ></script>
     <style>
       * {
         box-sizing: border-box;
@@ -15,7 +30,10 @@
         padding: 0;
       }
       body {
-        font-family: system-ui, -apple-system, sans-serif;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
         background: #0f1419;
         color: #e6edf3;
         height: 100vh;
@@ -174,8 +192,13 @@
         animation: pulse 2s ease-in-out infinite;
       }
       @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.4; }
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
       }
       .disconnect-title {
         font-size: 24px;
@@ -429,7 +452,8 @@
         border-radius: 50%;
         background: linear-gradient(145deg, #1f2428 0%, #161b22 100%);
         border: 2px solid #30363d;
-        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5),
+        box-shadow:
+          inset 0 2px 4px rgba(0, 0, 0, 0.5),
           0 2px 8px rgba(0, 0, 0, 0.3);
         position: relative;
       }
@@ -590,7 +614,7 @@
         user-select: none;
       }
       .wifi-state-header:hover {
-        background: rgba(255,255,255,0.03);
+        background: rgba(255, 255, 255, 0.03);
       }
       .wifi-state-expand {
         font-size: 10px;
@@ -637,8 +661,13 @@
         color: #f0883e;
       }
       @keyframes pulse-roaming {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.6; }
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.6;
+        }
       }
       .wifi-state-banner.offline {
         background: rgba(248, 81, 73, 0.2);
@@ -667,7 +696,7 @@
       .wifi-state-ap-count {
         font-size: 9px;
         color: #6e7681;
-        background: rgba(0,0,0,0.2);
+        background: rgba(0, 0, 0, 0.2);
         padding: 2px 6px;
         border-radius: 10px;
       }
@@ -699,8 +728,13 @@
         animation: pulse-better 2s ease-in-out infinite;
       }
       @keyframes pulse-better {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.7; }
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.7;
+        }
       }
       .ap-bssid {
         color: #8b949e;
@@ -711,9 +745,15 @@
         min-width: 50px;
         text-align: right;
       }
-      .ap-rssi.good { color: #3fb950; }
-      .ap-rssi.medium { color: #e3b341; }
-      .ap-rssi.bad { color: #f85149; }
+      .ap-rssi.good {
+        color: #3fb950;
+      }
+      .ap-rssi.medium {
+        color: #e3b341;
+      }
+      .ap-rssi.bad {
+        color: #f85149;
+      }
       .ap-indicator {
         font-size: 10px;
         padding: 2px 6px;
@@ -763,8 +803,12 @@
         animation: spin 1s linear infinite;
       }
       @keyframes spin {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
       }
       .rescan-btn.disabled {
         opacity: 0.4;
@@ -880,7 +924,7 @@
           font-size: 10px;
           padding: 4px 8px;
         }
-        
+
         /* Mobile layout: video -> joystick -> knobs */
         .main-grid {
           display: flex;
@@ -889,7 +933,7 @@
           padding: 8px;
           overflow: visible;
         }
-        
+
         /* Camera takes priority - flexible height */
         .camera-section {
           order: 1;
@@ -902,7 +946,7 @@
         .video-container {
           border-radius: 8px;
         }
-        
+
         /* Diagnostics becomes tiny pill overlay on video (when moved by JS) */
         .diagnostics-section.mobile-overlay {
           position: absolute;
@@ -930,7 +974,7 @@
           border-radius: 12px;
           background: rgba(0, 0, 0, 0.6);
           backdrop-filter: blur(4px);
-          border: 1px solid rgba(255,255,255,0.1);
+          border: 1px solid rgba(255, 255, 255, 0.1);
         }
         .diagnostics-section.mobile-overlay .wifi-state-header {
           padding: 4px 10px;
@@ -951,7 +995,8 @@
         }
         .diagnostics-section.mobile-overlay .wifi-state-detail {
           font-size: 9px;
-          opacity: 0.8;
+          color: rgba(255, 255, 255, 0.95);
+          font-weight: 500;
         }
         /* Hide expandable parts on mobile */
         .diagnostics-section.mobile-overlay .wifi-state-details,
@@ -964,35 +1009,51 @@
           background: rgba(46, 160, 67, 0.7);
           border-color: rgba(63, 185, 80, 0.5);
         }
-        .diagnostics-section.mobile-overlay .wifi-state-banner.ok .wifi-state-icon,
-        .diagnostics-section.mobile-overlay .wifi-state-banner.ok .wifi-state-label {
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.ok
+          .wifi-state-icon,
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.ok
+          .wifi-state-label {
           color: #fff;
         }
         .diagnostics-section.mobile-overlay .wifi-state-banner.degraded {
           background: rgba(210, 153, 34, 0.8);
           border-color: rgba(227, 179, 65, 0.5);
         }
-        .diagnostics-section.mobile-overlay .wifi-state-banner.degraded .wifi-state-icon,
-        .diagnostics-section.mobile-overlay .wifi-state-banner.degraded .wifi-state-label {
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.degraded
+          .wifi-state-icon,
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.degraded
+          .wifi-state-label {
           color: #fff;
         }
         .diagnostics-section.mobile-overlay .wifi-state-banner.roaming {
           background: rgba(227, 116, 50, 0.8);
           border-color: rgba(240, 136, 62, 0.5);
         }
-        .diagnostics-section.mobile-overlay .wifi-state-banner.roaming .wifi-state-icon,
-        .diagnostics-section.mobile-overlay .wifi-state-banner.roaming .wifi-state-label {
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.roaming
+          .wifi-state-icon,
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.roaming
+          .wifi-state-label {
           color: #fff;
         }
         .diagnostics-section.mobile-overlay .wifi-state-banner.offline {
           background: rgba(248, 81, 73, 0.8);
           border-color: rgba(248, 81, 73, 0.5);
         }
-        .diagnostics-section.mobile-overlay .wifi-state-banner.offline .wifi-state-icon,
-        .diagnostics-section.mobile-overlay .wifi-state-banner.offline .wifi-state-label {
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.offline
+          .wifi-state-icon,
+        .diagnostics-section.mobile-overlay
+          .wifi-state-banner.offline
+          .wifi-state-label {
           color: #fff;
         }
-        
+
         /* Joystick section - second priority */
         .joystick-section {
           order: 2;
@@ -1021,7 +1082,7 @@
         .motor-num {
           font-size: 16px;
         }
-        
+
         /* Knobs section - last */
         .controls-section.knobs-container {
           order: 3;
@@ -1045,7 +1106,7 @@
         .knob-value {
           font-size: 10px;
         }
-        
+
         /* Hide mobile splitter */
         .mobile-splitter {
           display: none;
@@ -1054,7 +1115,7 @@
           display: none;
         }
       }
-      
+
       /* Extra small screens (phones in portrait) */
       @media (max-width: 480px) {
         .joystick {
@@ -1087,28 +1148,51 @@
     <div class="header">
       <div class="header-left">
         <h1>Rover Control</h1>
-        <div class="role-badge spectator" id="roleStatus">
-          <i class="fa-light fa-eye role-icon" id="roleIcon"></i>
+        <div
+          class="role-badge spectator"
+          id="roleStatus"
+        >
+          <i
+            class="fa-light fa-eye role-icon"
+            id="roleIcon"
+          ></i>
           <span id="roleText">Connecting...</span>
         </div>
         <div class="header-actions">
-          <button class="header-btn claim hidden" id="claimBtn">
+          <button
+            class="header-btn claim hidden"
+            id="claimBtn"
+          >
             <i class="fa-light fa-gamepad"></i>
             <span>Take Control</span>
           </button>
-          <button class="header-btn request hidden" id="requestBtn">
+          <button
+            class="header-btn request hidden"
+            id="requestBtn"
+          >
             <i class="fa-light fa-hand"></i>
             <span>Request</span>
-            <div class="cooldown-bar" id="cooldownBar"></div>
+            <div
+              class="cooldown-bar"
+              id="cooldownBar"
+            ></div>
           </button>
-          <button class="header-btn release hidden" id="releaseBtn">
+          <button
+            class="header-btn release hidden"
+            id="releaseBtn"
+          >
             <i class="fa-light fa-hand-holding"></i>
             <span>Release</span>
           </button>
         </div>
       </div>
       <div class="header-right">
-        <div class="status" id="status">WS: connecting...</div>
+        <div
+          class="status"
+          id="status"
+        >
+          WS: connecting...
+        </div>
       </div>
     </div>
 
@@ -1119,24 +1203,41 @@
             id="cameraFeed"
             allow="autoplay; fullscreen; microphone; camera"
           ></iframe>
-          <div class="disconnect-overlay" id="disconnectOverlay">
+          <div
+            class="disconnect-overlay"
+            id="disconnectOverlay"
+          >
             <div class="disconnect-icon">
               <i class="fa-light fa-wifi-slash"></i>
             </div>
             <div class="disconnect-title">Disconnected</div>
-            <div class="disconnect-status" id="disconnectStatus">Reconnecting...</div>
+            <div
+              class="disconnect-status"
+              id="disconnectStatus"
+            >
+              Reconnecting...
+            </div>
           </div>
-          <div class="request-overlay" id="requestOverlay">
+          <div
+            class="request-overlay"
+            id="requestOverlay"
+          >
             <div class="request-overlay-title">
               <i class="fa-light fa-hand"></i>
               <span id="requestFromName">Someone</span> wants control
             </div>
             <div class="request-overlay-actions">
-              <button class="request-overlay-btn accept" id="acceptBtn">
+              <button
+                class="request-overlay-btn accept"
+                id="acceptBtn"
+              >
                 <i class="fa-light fa-check"></i>
                 Accept
               </button>
-              <button class="request-overlay-btn deny" id="denyBtn">
+              <button
+                class="request-overlay-btn deny"
+                id="denyBtn"
+              >
                 <i class="fa-light fa-xmark"></i>
                 Deny
               </button>
@@ -1152,42 +1253,83 @@
 
       <div class="diagnostics-section">
         <!-- Wi-Fi Safety State Indicator - Expandable -->
-        <div class="wifi-state-banner" id="wifiStateBanner">
-          <div class="wifi-state-header" id="wifiStateHeader">
+        <div
+          class="wifi-state-banner"
+          id="wifiStateBanner"
+        >
+          <div
+            class="wifi-state-header"
+            id="wifiStateHeader"
+          >
             <div class="wifi-state-icon">
-              <i class="fa-light fa-wifi" id="wifiStateIcon"></i>
+              <i
+                class="fa-light fa-wifi"
+                id="wifiStateIcon"
+              ></i>
             </div>
             <div class="wifi-state-info">
-              <div class="wifi-state-label" id="wifiStateLabel">Connecting...</div>
-              <div class="wifi-state-detail" id="wifiStateDetail"></div>
+              <div
+                class="wifi-state-label"
+                id="wifiStateLabel"
+              >
+                Connecting...
+              </div>
+              <div
+                class="wifi-state-detail"
+                id="wifiStateDetail"
+              ></div>
             </div>
-            <span class="wifi-state-ap-count" id="wifiApCount">0 APs</span>
+            <span
+              class="wifi-state-ap-count"
+              id="wifiApCount"
+              >0 APs</span
+            >
             <i class="fa-light fa-chevron-down wifi-state-expand"></i>
           </div>
           <div class="wifi-state-details">
             <div class="wifi-state-details-inner">
-              <div class="diag-grid" style="margin-bottom: 8px;">
+              <div
+                class="diag-grid"
+                style="margin-bottom: 8px"
+              >
                 <div class="diag-card">
                   <div class="diag-label">BSSID</div>
-                  <div class="diag-value diag-value-small" id="wifiBssid">--:--:--</div>
+                  <div
+                    class="diag-value diag-value-small"
+                    id="wifiBssid"
+                  >
+                    --:--:--
+                  </div>
                 </div>
                 <div class="diag-card">
                   <div class="diag-label">Freq</div>
                   <div class="diag-value">
-                    <span id="wifiFreq">--</span><span class="diag-unit">MHz</span>
+                    <span id="wifiFreq">--</span
+                    ><span class="diag-unit">MHz</span>
                   </div>
                 </div>
                 <div class="diag-card">
                   <div class="diag-label">TX/RX</div>
-                  <div class="diag-value diag-value-small" id="wifiBitrate">--/--</div>
+                  <div
+                    class="diag-value diag-value-small"
+                    id="wifiBitrate"
+                  >
+                    --/--
+                  </div>
                 </div>
               </div>
-              <div class="nearby-aps-list" id="nearbyApsList">
+              <div
+                class="nearby-aps-list"
+                id="nearbyApsList"
+              >
                 <div class="nearby-ap-item">Scanning...</div>
               </div>
-              <button class="rescan-btn" id="rescanBtn">
+              <button
+                class="rescan-btn"
+                id="rescanBtn"
+              >
                 <i class="fa-light fa-arrows-rotate"></i>
-                <span>Rescan & Connect Best</span>
+                <span>Restart Wi-Fi & Roam</span>
               </button>
             </div>
           </div>
@@ -1213,15 +1355,17 @@
             </div>
           </div>
         </div>
-
       </div>
 
       <div class="controls-section joystick-section">
         <!-- Headlight button - absolute positioned in corner -->
-        <div class="headlight-btn" id="headlightBtn">
+        <div
+          class="headlight-btn"
+          id="headlightBtn"
+        >
           <i class="fa-light fa-lightbulb"></i>
         </div>
-        
+
         <div
           class="joystick"
           id="joystick"
@@ -1231,9 +1375,17 @@
             class="joystick-handle"
             id="joystick-handle"
           ></div>
-          <div class="motor-inhibited-overlay" id="motorInhibitedOverlay">
+          <div
+            class="motor-inhibited-overlay"
+            id="motorInhibitedOverlay"
+          >
             <i class="fa-light fa-hand motor-inhibited-icon"></i>
-            <div class="motor-inhibited-text" id="motorInhibitedText">STOPPED</div>
+            <div
+              class="motor-inhibited-text"
+              id="motorInhibitedText"
+            >
+              STOPPED
+            </div>
           </div>
         </div>
 

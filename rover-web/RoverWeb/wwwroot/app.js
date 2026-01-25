@@ -1039,21 +1039,86 @@ function triggerRescan(e) {
   
   rescanBtn?.classList.add('scanning');
   const spanEl = rescanBtn?.querySelector('span');
-  if (spanEl) spanEl.textContent = 'Scanning...';
+  if (spanEl) spanEl.textContent = 'Restarting Wi-Fi...';
+  
+  // Show wifi restart overlay
+  showWifiRestartOverlay();
   
   send('RESCAN');
 }
 
+function showWifiRestartOverlay() {
+  // Create or get overlay
+  let overlay = document.getElementById('wifiRestartOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'wifiRestartOverlay';
+    overlay.innerHTML = `
+      <div class="wifi-restart-content">
+        <i class="fa-light fa-arrows-rotate fa-spin"></i>
+        <span id="wifiRestartStatus">Restarting Wi-Fi...</span>
+      </div>
+    `;
+    overlay.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    `;
+    const content = overlay.querySelector('.wifi-restart-content');
+    if (content) {
+      content.style.cssText = `
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 24px 32px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        color: #e6edf3;
+        font-size: 16px;
+      `;
+    }
+    const icon = overlay.querySelector('i');
+    if (icon) {
+      icon.style.cssText = 'font-size: 32px; color: #58a6ff;';
+    }
+    document.body.appendChild(overlay);
+  }
+  overlay.style.display = 'flex';
+}
+
+function hideWifiRestartOverlay() {
+  const overlay = document.getElementById('wifiRestartOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function updateWifiRestartStatus(text) {
+  const statusEl = document.getElementById('wifiRestartStatus');
+  if (statusEl) statusEl.textContent = text;
+}
+
 function handleRescanResult(result) {
   const spanEl = rescanBtn?.querySelector('span');
-  rescanBtn?.classList.remove('scanning');
   
   if (result === 'started') {
-    // Still in progress
+    // Still in progress - update overlay status
     rescanBtn?.classList.add('scanning');
-    if (spanEl) spanEl.textContent = 'Scanning...';
+    if (spanEl) spanEl.textContent = 'Restarting Wi-Fi...';
+    updateWifiRestartStatus('Restarting Wi-Fi interface...');
     return;
   }
+  
+  // Operation complete - hide overlay and show result
+  rescanBtn?.classList.remove('scanning');
+  hideWifiRestartOverlay();
   
   // Parse result and show feedback
   if (result.startsWith('roamed:')) {
@@ -1062,26 +1127,26 @@ function handleRescanResult(result) {
     const rssi = parts[2] || '';
     if (spanEl) spanEl.textContent = `Roamed to ${bssid}`;
     setTimeout(() => {
-      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+      if (spanEl) spanEl.textContent = 'Restart Wi-Fi & Roam';
     }, 3000);
   } else if (result.startsWith('already_best:')) {
     if (spanEl) spanEl.textContent = 'Already on best AP';
     setTimeout(() => {
-      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+      if (spanEl) spanEl.textContent = 'Restart Wi-Fi & Roam';
     }, 2000);
   } else if (result.startsWith('no_better_ap:')) {
     if (spanEl) spanEl.textContent = 'No better AP found';
     setTimeout(() => {
-      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+      if (spanEl) spanEl.textContent = 'Restart Wi-Fi & Roam';
     }, 2000);
   } else if (result === 'no_aps_found') {
     if (spanEl) spanEl.textContent = 'No APs found';
     setTimeout(() => {
-      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+      if (spanEl) spanEl.textContent = 'Restart Wi-Fi & Roam';
     }, 2000);
   } else {
     console.log('Rescan result:', result);
-    if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+    if (spanEl) spanEl.textContent = 'Restart Wi-Fi & Roam';
   }
 }
 
