@@ -24,21 +24,207 @@
         flex-direction: column;
       }
       .header {
-        padding: 12px 16px;
+        padding: 10px 16px;
         border-bottom: 1px solid #30363d;
         display: flex;
         justify-content: space-between;
         align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: 16px;
       }
       h1 {
         font-size: 18px;
         font-weight: 600;
         color: #f0f6fc;
       }
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
       .status {
         font-family: ui-monospace, monospace;
         font-size: 12px;
         color: #8b949e;
+      }
+      /* Role status in header */
+      .role-badge {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .role-badge.operator {
+        background: rgba(46, 160, 67, 0.2);
+        border: 1px solid #2ea043;
+        color: #3fb950;
+      }
+      .role-badge.spectator {
+        background: rgba(210, 153, 34, 0.2);
+        border: 1px solid #d29922;
+        color: #e3b341;
+      }
+      .role-badge .role-icon {
+        font-size: 14px;
+      }
+      .header-btn {
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid #30363d;
+        background: #21262d;
+        color: #e6edf3;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .header-btn:hover {
+        background: #30363d;
+        border-color: #444c56;
+      }
+      .header-btn:active {
+        transform: scale(0.98);
+      }
+      .header-btn.claim {
+        background: #1f6feb;
+        border-color: #388bfd;
+        color: #fff;
+      }
+      .header-btn.claim:hover {
+        background: #388bfd;
+      }
+      .header-btn.hidden {
+        display: none;
+      }
+      .header-btn.request {
+        background: #1f6feb;
+        border-color: #388bfd;
+        color: #fff;
+      }
+      .header-btn.request:hover {
+        background: #388bfd;
+      }
+      .header-btn.request.pending {
+        background: #6e7681;
+        border-color: #6e7681;
+        cursor: wait;
+      }
+      .header-btn.release {
+        background: rgba(139, 148, 158, 0.15);
+        border-color: #6e7681;
+        color: #8b949e;
+      }
+      .header-btn.release:hover {
+        background: rgba(139, 148, 158, 0.25);
+      }
+      .header-btn.accept {
+        background: rgba(46, 160, 67, 0.2);
+        border-color: #2ea043;
+        color: #3fb950;
+      }
+      .header-btn.accept:hover {
+        background: rgba(46, 160, 67, 0.3);
+      }
+      .header-btn.deny {
+        background: rgba(248, 81, 73, 0.15);
+        border-color: #f85149;
+        color: #f85149;
+      }
+      .header-btn.deny:hover {
+        background: rgba(248, 81, 73, 0.25);
+      }
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        position: relative;
+      }
+      /* Request overlay - centered on video */
+      .request-overlay {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 20px 28px;
+        background: rgba(22, 27, 34, 0.95);
+        border: 2px solid #d29922;
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        z-index: 100;
+        text-align: center;
+      }
+      .request-overlay.visible {
+        display: flex;
+      }
+      .request-overlay-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #e3b341;
+      }
+      .request-overlay-actions {
+        display: flex;
+        gap: 12px;
+      }
+      .request-overlay-btn {
+        padding: 10px 20px;
+        border-radius: 6px;
+        border: none;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .request-overlay-btn.accept {
+        background: #2ea043;
+        color: #fff;
+      }
+      .request-overlay-btn.accept:hover {
+        background: #3fb950;
+      }
+      .request-overlay-btn.deny {
+        background: #21262d;
+        border: 1px solid #f85149;
+        color: #f85149;
+      }
+      .request-overlay-btn.deny:hover {
+        background: rgba(248, 81, 73, 0.15);
+      }
+      /* Cooldown button styles */
+      .header-btn.request {
+        position: relative;
+        overflow: hidden;
+      }
+      .header-btn.request.cooldown {
+        background: #21262d;
+        border-color: #30363d;
+        color: #6e7681;
+        cursor: not-allowed;
+      }
+      .header-btn.request .cooldown-bar {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        height: 3px;
+        background: #388bfd;
+        transition: width 0.1s linear;
       }
       .main-grid {
         display: grid;
@@ -221,7 +407,7 @@
       }
       .control-grid {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
         gap: 12px;
       }
       .diag-card {
@@ -334,6 +520,35 @@
         body {
           overflow: auto;
         }
+        .header {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 8px;
+        }
+        .header-left {
+          flex-wrap: wrap;
+          justify-content: center;
+          gap: 8px;
+        }
+        .header-left h1 {
+          width: 100%;
+          text-align: center;
+        }
+        .header-right {
+          justify-content: center;
+        }
+        .role-badge {
+          font-size: 11px;
+          padding: 5px 10px;
+        }
+        .header-actions {
+          flex-wrap: wrap;
+          justify-content: center;
+        }
+        .header-btn {
+          font-size: 11px;
+          padding: 5px 10px;
+        }
         .main-grid {
           grid-template-columns: 1fr;
           grid-template-rows: 40vh auto auto auto;
@@ -385,12 +600,30 @@
   </head>
   <body>
     <div class="header">
-      <h1>Rover Control</h1>
-      <div
-        class="status"
-        id="status"
-      >
-        WS: connecting...
+      <div class="header-left">
+        <h1>Rover Control</h1>
+        <div class="role-badge spectator" id="roleStatus">
+          <i class="fa-light fa-eye role-icon" id="roleIcon"></i>
+          <span id="roleText">Connecting...</span>
+        </div>
+        <div class="header-actions">
+          <button class="header-btn claim hidden" id="claimBtn">
+            <i class="fa-light fa-gamepad"></i>
+            <span>Take Control</span>
+          </button>
+          <button class="header-btn request hidden" id="requestBtn">
+            <i class="fa-light fa-hand"></i>
+            <span>Request</span>
+            <div class="cooldown-bar" id="cooldownBar"></div>
+          </button>
+          <button class="header-btn release hidden" id="releaseBtn">
+            <i class="fa-light fa-hand-holding"></i>
+            <span>Release</span>
+          </button>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status" id="status">WS: connecting...</div>
       </div>
     </div>
 
@@ -401,6 +634,22 @@
             id="cameraFeed"
             allow="autoplay; fullscreen; microphone; camera"
           ></iframe>
+          <div class="request-overlay" id="requestOverlay">
+            <div class="request-overlay-title">
+              <i class="fa-light fa-hand"></i>
+              <span id="requestFromName">Someone</span> wants control
+            </div>
+            <div class="request-overlay-actions">
+              <button class="request-overlay-btn accept" id="acceptBtn">
+                <i class="fa-light fa-check"></i>
+                Accept
+              </button>
+              <button class="request-overlay-btn deny" id="denyBtn">
+                <i class="fa-light fa-xmark"></i>
+                Deny
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -435,10 +684,6 @@
           <div class="control-card" id="headlightBtn">
             <i class="fa-light fa-lightbulb control-icon"></i>
             <div class="control-label">Headlight</div>
-          </div>
-          <div class="control-card" id="spectatorBtn">
-            <i class="fa-light fa-eye control-icon"></i>
-            <div class="control-label">Spectator</div>
           </div>
         </div>
       </div>

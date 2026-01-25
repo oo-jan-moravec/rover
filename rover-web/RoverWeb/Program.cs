@@ -4,9 +4,12 @@ using System.IO.Ports;
 using System.Net.WebSockets;
 using System.Text;
 
+const string CLIENT_VERSION = "1.0.0";
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
 builder.Services.AddSingleton<WebSocketManager>();
+builder.Services.AddSingleton<OperatorManager>();
 builder.Services.AddSingleton<GpioController>();
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
@@ -18,7 +21,7 @@ app.UseStaticFiles();
 
 app.UseWebSockets();
 
-app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, GpioController gpio) =>
+app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, OperatorManager opManager, GpioController gpio) =>
 {
     if (!ctx.WebSockets.IsWebSocketRequest)
     {
@@ -28,11 +31,68 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
 
     using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
     var clientId = Guid.NewGuid();
+    var clientName = opManager.RegisterClient(clientId);
     wsManager.AddClient(clientId, ws);
+
+    // Helper to send role status to a specific client
+    async Task SendRoleStatus(Guid targetId)
+    {
+        if (opManager.IsOperator(targetId))
+        {
+            var pendingName = opManager.GetPendingRequesterName();
+            if (pendingName != null)
+                await wsManager.SendToClientAsync(targetId, $"ROLE:operator|{pendingName}");
+            else
+                await wsManager.SendToClientAsync(targetId, "ROLE:operator");
+        }
+        else
+        {
+            var operatorName = opManager.GetCurrentOperatorName();
+            if (operatorName != null)
+                await wsManager.SendToClientAsync(targetId, $"ROLE:spectator|{operatorName}");
+            else
+                await wsManager.SendToClientAsync(targetId, "ROLE:spectator|none");
+        }
+    }
+
+    // Helper to broadcast role updates to all clients
+    async Task BroadcastRoleUpdates()
+    {
+        foreach (var id in wsManager.GetAllClientIds())
+        {
+            await SendRoleStatus(id);
+        }
+    }
 
     try
     {
         var buffer = new byte[256];
+        
+        // Wait for version handshake first
+        var versionResult = await ws.ReceiveAsync(buffer, CancellationToken.None);
+        if (versionResult.MessageType == WebSocketMessageType.Close) return;
+        
+        var versionMsg = Encoding.UTF8.GetString(buffer, 0, versionResult.Count).Trim();
+        
+        if (!versionMsg.StartsWith("VERSION:"))
+        {
+            // No version provided - outdated client
+            await wsManager.SendToClientAsync(clientId, $"VERSION_MISMATCH:{CLIENT_VERSION}");
+            return;
+        }
+        
+        var clientVersion = versionMsg.Substring(8);
+        if (clientVersion != CLIENT_VERSION)
+        {
+            // Version mismatch - client needs to reload
+            await wsManager.SendToClientAsync(clientId, $"VERSION_MISMATCH:{CLIENT_VERSION}");
+            return;
+        }
+        
+        // Version OK - continue with normal setup
+        await wsManager.SendToClientAsync(clientId, "VERSION_OK");
+        await wsManager.SendToClientAsync(clientId, $"NAME:{clientName}");
+        await SendRoleStatus(clientId);
 
         while (ws.State == WebSocketState.Open)
         {
@@ -41,35 +101,105 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
 
             var msg = Encoding.UTF8.GetString(buffer, 0, result.Count).Trim();
 
-            state.Touch();
-
-            if (msg == "S")
+            // Handle operator/spectator protocol
+            if (msg == "CLAIM")
             {
-                state.Set(0, 0);
-            }
-            else if (msg.StartsWith("M "))
-            {
-                var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length == 3 &&
-                    int.TryParse(parts[1], out var l) &&
-                    int.TryParse(parts[2], out var r))
+                if (opManager.TryClaim(clientId))
                 {
-                    state.Set(Clamp(l), Clamp(r));
+                    await BroadcastRoleUpdates();
+                }
+                else
+                {
+                    await SendRoleStatus(clientId);
                 }
             }
-            else if (msg.StartsWith("H "))
+            else if (msg == "REQUEST")
             {
-                var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length == 2 && int.TryParse(parts[1], out var state_val))
+                if (opManager.RequestControl(clientId, out var operatorId))
                 {
-                    gpio.SetHeadlight(state_val == 1);
+                    // Auto-granted (no operator was present)
+                    await BroadcastRoleUpdates();
+                }
+                else if (operatorId.HasValue)
+                {
+                    // Notify operator of request
+                    await BroadcastRoleUpdates();
+                }
+            }
+            else if (msg == "ACCEPT")
+            {
+                var (success, newOperatorId, oldOperatorId) = opManager.AcceptRequest(clientId);
+                if (success && newOperatorId.HasValue)
+                {
+                    await wsManager.SendToClientAsync(newOperatorId.Value, "GRANTED");
+                    await BroadcastRoleUpdates();
+                    // Stop the rover when control transfers
+                    state.Set(0, 0);
+                }
+            }
+            else if (msg == "DENY")
+            {
+                var (success, requesterId) = opManager.DenyRequest(clientId);
+                if (success && requesterId.HasValue)
+                {
+                    await wsManager.SendToClientAsync(requesterId.Value, "DENIED");
+                    await BroadcastRoleUpdates();
+                }
+            }
+            else if (msg == "RELEASE")
+            {
+                if (opManager.ReleaseControl(clientId))
+                {
+                    state.Set(0, 0); // Stop rover
+                    await BroadcastRoleUpdates();
+                }
+            }
+            // Handle control commands - only from operator
+            else if (opManager.IsOperator(clientId))
+            {
+                state.Touch();
+
+                if (msg == "S")
+                {
+                    state.Set(0, 0);
+                }
+                else if (msg.StartsWith("M "))
+                {
+                    var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 3 &&
+                        int.TryParse(parts[1], out var l) &&
+                        int.TryParse(parts[2], out var r))
+                    {
+                        state.Set(Clamp(l), Clamp(r));
+                    }
+                }
+                else if (msg.StartsWith("H "))
+                {
+                    var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 2 && int.TryParse(parts[1], out var state_val))
+                    {
+                        gpio.SetHeadlight(state_val == 1);
+                    }
                 }
             }
         }
     }
     finally
     {
+        var wasOperator = opManager.IsOperator(clientId);
+        opManager.UnregisterClient(clientId);
         wsManager.RemoveClient(clientId);
+        
+        // If operator disconnected, notify all clients
+        if (wasOperator)
+        {
+            state.Set(0, 0); // Stop rover
+            foreach (var id in wsManager.GetAllClientIds())
+            {
+                await SendRoleStatus(id);
+            }
+        }
+        
         try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); }
         catch { /* ignore */ }
     }
@@ -100,6 +230,22 @@ sealed class WebSocketManager
         if (_clients.TryRemove(id, out _))
         {
             _logger?.LogInformation($"WebSocket client removed: {id}. Total clients: {_clients.Count}");
+        }
+    }
+
+    public async Task SendToClientAsync(Guid clientId, string message)
+    {
+        if (_clients.TryGetValue(clientId, out var ws) && ws.State == WebSocketState.Open)
+        {
+            try
+            {
+                var buffer = Encoding.UTF8.GetBytes(message);
+                await ws.SendAsync(buffer, WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+            catch
+            {
+                // Client disconnected
+            }
         }
     }
 
@@ -148,6 +294,8 @@ sealed class WebSocketManager
 
         return Task.CompletedTask;
     }
+
+    public IEnumerable<Guid> GetAllClientIds() => _clients.Keys;
 }
 
 sealed class RoverState
@@ -174,6 +322,203 @@ sealed class RoverState
     public void Touch()
     {
         lock (_lock) _lastUpdateUtc = DateTime.UtcNow;
+    }
+}
+
+sealed class OperatorManager
+{
+    private readonly object _lock = new();
+    private readonly ConcurrentDictionary<Guid, string> _clientNames = new();
+    private int _nextPilotNumber = 1;
+    
+    private Guid? _currentOperatorId;
+    private Guid? _pendingRequestId;
+    private readonly ILogger<OperatorManager>? _logger;
+
+    public OperatorManager(ILogger<OperatorManager>? logger = null)
+    {
+        _logger = logger;
+    }
+
+    public string RegisterClient(Guid clientId)
+    {
+        var name = $"Pilot-{_nextPilotNumber++}";
+        _clientNames.TryAdd(clientId, name);
+        _logger?.LogInformation($"Client registered: {clientId} as {name}");
+        return name;
+    }
+
+    public void UnregisterClient(Guid clientId)
+    {
+        _clientNames.TryRemove(clientId, out _);
+        
+        lock (_lock)
+        {
+            if (_currentOperatorId == clientId)
+            {
+                _logger?.LogInformation($"Operator {clientId} disconnected, clearing operator");
+                _currentOperatorId = null;
+            }
+            if (_pendingRequestId == clientId)
+            {
+                _logger?.LogInformation($"Requester {clientId} disconnected, clearing pending request");
+                _pendingRequestId = null;
+            }
+        }
+    }
+
+    public string? GetClientName(Guid clientId)
+    {
+        return _clientNames.TryGetValue(clientId, out var name) ? name : null;
+    }
+
+    public bool IsOperator(Guid clientId)
+    {
+        lock (_lock) return _currentOperatorId == clientId;
+    }
+
+    public Guid? GetCurrentOperatorId()
+    {
+        lock (_lock) return _currentOperatorId;
+    }
+
+    public string? GetCurrentOperatorName()
+    {
+        lock (_lock)
+        {
+            if (_currentOperatorId.HasValue && _clientNames.TryGetValue(_currentOperatorId.Value, out var name))
+                return name;
+            return null;
+        }
+    }
+
+    public bool TryClaim(Guid clientId)
+    {
+        lock (_lock)
+        {
+            if (_currentOperatorId == null)
+            {
+                _currentOperatorId = clientId;
+                _logger?.LogInformation($"Client {clientId} claimed operator role");
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public bool RequestControl(Guid clientId, out Guid? operatorId)
+    {
+        lock (_lock)
+        {
+            operatorId = _currentOperatorId;
+            
+            if (_currentOperatorId == null)
+            {
+                // No operator, auto-grant
+                _currentOperatorId = clientId;
+                _logger?.LogInformation($"No operator, auto-granting to {clientId}");
+                return true;
+            }
+            
+            if (_currentOperatorId == clientId)
+            {
+                // Already operator
+                return true;
+            }
+            
+            if (_pendingRequestId != null)
+            {
+                // Already a pending request
+                _logger?.LogInformation($"Request from {clientId} rejected - already pending request from {_pendingRequestId}");
+                return false;
+            }
+            
+            _pendingRequestId = clientId;
+            _logger?.LogInformation($"Control request from {clientId} pending for operator {_currentOperatorId}");
+            return false;
+        }
+    }
+
+    public (bool Success, Guid? NewOperatorId, Guid? OldOperatorId) AcceptRequest(Guid operatorId)
+    {
+        lock (_lock)
+        {
+            if (_currentOperatorId != operatorId)
+            {
+                _logger?.LogWarning($"Accept from non-operator {operatorId}");
+                return (false, null, null);
+            }
+            
+            if (_pendingRequestId == null)
+            {
+                _logger?.LogWarning($"Accept but no pending request");
+                return (false, null, null);
+            }
+            
+            var oldOperator = _currentOperatorId;
+            var newOperator = _pendingRequestId.Value;
+            _currentOperatorId = newOperator;
+            _pendingRequestId = null;
+            
+            _logger?.LogInformation($"Control transferred from {oldOperator} to {newOperator}");
+            return (true, newOperator, oldOperator);
+        }
+    }
+
+    public (bool Success, Guid? RequesterId) DenyRequest(Guid operatorId)
+    {
+        lock (_lock)
+        {
+            if (_currentOperatorId != operatorId)
+            {
+                _logger?.LogWarning($"Deny from non-operator {operatorId}");
+                return (false, null);
+            }
+            
+            if (_pendingRequestId == null)
+            {
+                _logger?.LogWarning($"Deny but no pending request");
+                return (false, null);
+            }
+            
+            var requesterId = _pendingRequestId.Value;
+            _pendingRequestId = null;
+            
+            _logger?.LogInformation($"Request from {requesterId} denied by {operatorId}");
+            return (true, requesterId);
+        }
+    }
+
+    public bool ReleaseControl(Guid operatorId)
+    {
+        lock (_lock)
+        {
+            if (_currentOperatorId != operatorId)
+            {
+                _logger?.LogWarning($"Release from non-operator {operatorId}");
+                return false;
+            }
+            
+            _logger?.LogInformation($"Operator {operatorId} released control");
+            _currentOperatorId = null;
+            _pendingRequestId = null; // Clear any pending request
+            return true;
+        }
+    }
+
+    public Guid? GetPendingRequestId()
+    {
+        lock (_lock) return _pendingRequestId;
+    }
+
+    public string? GetPendingRequesterName()
+    {
+        lock (_lock)
+        {
+            if (_pendingRequestId.HasValue && _clientNames.TryGetValue(_pendingRequestId.Value, out var name))
+                return name;
+            return null;
+        }
     }
 }
 

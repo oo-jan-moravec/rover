@@ -1,3 +1,5 @@
+const CLIENT_VERSION = "1.0.0";
+
 const statusEl = document.getElementById("status");
 const leftValueEl = document.getElementById("leftValue");
 const rightValueEl = document.getElementById("rightValue");
@@ -45,7 +47,16 @@ let spinZonePercent = parseFloat(localStorage.getItem('spinZone') || '15');
 let forwardTrim = parseInt(localStorage.getItem('forwardTrim') || '0');
 let reverseTrim = parseInt(localStorage.getItem('reverseTrim') || '0');
 let headlightOn = false;
-let spectatorMode = false;
+
+// Operator/Spectator state (server-managed)
+let isOperator = false;
+let myName = "";
+let operatorName = "";
+let pendingRequestFrom = null;
+let requestPending = false;
+let requestCooldownEnd = 0;
+let cooldownInterval = null;
+const REQUEST_COOLDOWN_MS = 30000; // 30 seconds
 
 const SEND_HZ = 25;
 const MAX_RECONNECT_DELAY = 5000;
@@ -83,6 +94,9 @@ function connect() {
       reconnectAttempts = 0; // Reset counter on successful connection
       lastPongTime = Date.now();
       
+      // Send version handshake first
+      send(`VERSION:${CLIENT_VERSION}`);
+      
       // Start ping interval
       pingInterval = setInterval(checkConnection, PING_INTERVAL);
     };
@@ -107,13 +121,50 @@ function connect() {
     ws.onmessage = (event) => {
       lastPongTime = Date.now(); // Any message counts as a "pong"
       const msg = event.data;
-      if (msg.startsWith("DIAG:")) {
+      
+      if (msg.startsWith("VERSION_MISMATCH:")) {
+        const serverVersion = msg.substring(17);
+        showVersionMismatchModal(serverVersion);
+        return;
+      } else if (msg === "VERSION_OK") {
+        console.log("Version check passed");
+        return;
+      } else if (msg.startsWith("DIAG:")) {
         const data = msg.substring(5).split('|');
         if (data.length === 3) {
           if (cpuTempEl) cpuTempEl.textContent = data[0];
           if (wifiSignalEl) wifiSignalEl.textContent = data[1];
           if (pingMsEl) pingMsEl.textContent = data[2] === "-1" ? "ERR" : data[2];
         }
+      } else if (msg.startsWith("NAME:")) {
+        myName = msg.substring(5);
+        console.log("My name:", myName);
+      } else if (msg.startsWith("ROLE:")) {
+        const parts = msg.substring(5).split('|');
+        const role = parts[0];
+        const extra = parts[1] || null;
+        
+        if (role === "operator") {
+          isOperator = true;
+          operatorName = myName;
+          pendingRequestFrom = extra; // Will be requester name if someone is requesting
+          requestPending = false;
+        } else {
+          isOperator = false;
+          operatorName = extra !== "none" ? extra : "";
+          pendingRequestFrom = null;
+        }
+        updateRoleUI();
+      } else if (msg === "GRANTED") {
+        // Our request was accepted
+        requestPending = false;
+        console.log("Control granted!");
+        // Role update will come separately
+      } else if (msg === "DENIED") {
+        // Our request was denied
+        requestPending = false;
+        console.log("Control request denied");
+        updateRoleUI();
       }
     };
   } catch (error) {
@@ -153,8 +204,8 @@ function updateJoystickFromMotors(left, right) {
 function tick() {
   let left, right;
   
-  if (spectatorMode) {
-    // In spectator mode, don't send any commands
+  if (!isOperator) {
+    // Not operator - don't send any commands
     left = 0;
     right = 0;
   } else if (joystickActive) {
@@ -167,8 +218,8 @@ function tick() {
   
   updateUI(left, right);
   
-  // Only send commands if not in spectator mode
-  if (!spectatorMode) {
+  // Only send commands if we are the operator
+  if (isOperator) {
     send(`M ${left} ${right}`);
   }
   
@@ -194,7 +245,7 @@ function updateJoystickRect() {
 }
 
 function handleJoystickMove(clientX, clientY) {
-  if (!isDragging || spectatorMode) return;
+  if (!isDragging || !isOperator) return;
 
   // Calculate offset from center
   let dx = clientX - joystickCenterX;
@@ -287,7 +338,7 @@ function resetJoystick() {
 
 // Mouse events
 joystickHandle.addEventListener("mousedown", (e) => {
-  if (spectatorMode) return;
+  if (!isOperator) return;
   e.preventDefault();
   isDragging = true;
   updateJoystickRect();
@@ -307,7 +358,7 @@ window.addEventListener("mouseup", () => {
 
 // Touch events
 joystickHandle.addEventListener("touchstart", (e) => {
-  if (spectatorMode) return;
+  if (!isOperator) return;
   e.preventDefault();
   isDragging = true;
   updateJoystickRect();
@@ -316,7 +367,7 @@ joystickHandle.addEventListener("touchstart", (e) => {
 }, { passive: false });
 
 window.addEventListener("touchmove", (e) => {
-  if (isDragging && e.touches.length > 0 && !spectatorMode) {
+  if (isDragging && e.touches.length > 0 && isOperator) {
     e.preventDefault();
     const touch = e.touches[0];
     handleJoystickMove(touch.clientX, touch.clientY);
@@ -324,19 +375,19 @@ window.addEventListener("touchmove", (e) => {
 }, { passive: false });
 
 window.addEventListener("touchend", (e) => {
-  if (isDragging || spectatorMode) {
+  if (isDragging) {
     e.preventDefault();
     resetJoystick();
   }
 }, { passive: false });
 
 window.addEventListener("touchcancel", () => {
-  if (isDragging || spectatorMode) resetJoystick();
+  if (isDragging) resetJoystick();
 });
 
 // Pointer events for better cross-device support
 joystickHandle.addEventListener("pointerdown", (e) => {
-  if (e.pointerType === "mouse" || spectatorMode) return; // Already handled by mouse events
+  if (e.pointerType === "mouse" || !isOperator) return; // Already handled by mouse events
   e.preventDefault();
   isDragging = true;
   updateJoystickRect();
@@ -345,13 +396,13 @@ joystickHandle.addEventListener("pointerdown", (e) => {
 });
 
 window.addEventListener("pointermove", (e) => {
-  if (isDragging && e.pointerType !== "mouse" && !spectatorMode) {
+  if (isDragging && e.pointerType !== "mouse" && isOperator) {
     handleJoystickMove(e.clientX, e.clientY);
   }
 });
 
 window.addEventListener("pointerup", (e) => {
-  if (isDragging && e.pointerType !== "mouse" || spectatorMode) {
+  if (isDragging && e.pointerType !== "mouse") {
     resetJoystick();
   }
 });
@@ -478,7 +529,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   }
   
   function handleMove(e) {
-    if (!isDragging || spectatorMode) return;
+    if (!isDragging || !isOperator) return;
     
     const currentAngle = getAngleFromEvent(e);
     let angleDelta = currentAngle - startAngle;
@@ -495,7 +546,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   }
   
   knobEl.addEventListener('mousedown', (e) => {
-    if (spectatorMode) return;
+    if (!isOperator) return;
     e.preventDefault();
     isDragging = true;
     startAngle = getAngleFromEvent(e);
@@ -511,7 +562,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   });
   
   knobEl.addEventListener('touchstart', (e) => {
-    if (spectatorMode) return;
+    if (!isOperator) return;
     e.preventDefault();
     isDragging = true;
     const touch = e.touches[0];
@@ -633,7 +684,7 @@ const headlightBtn = document.getElementById('headlightBtn');
 const headlightIcon = headlightBtn?.querySelector('.control-icon');
 
 function toggleHeadlight(e) {
-  if (spectatorMode) return;
+  if (!isOperator) return;
   e.preventDefault();
   e.stopPropagation();
   
@@ -660,14 +711,123 @@ if (headlightBtn) {
   headlightBtn.addEventListener('touchend', toggleHeadlight, { passive: false });
 }
 
-// Spectator mode control
-const spectatorBtn = document.getElementById('spectatorBtn');
-const spectatorIcon = spectatorBtn?.querySelector('.control-icon');
+// Operator/Spectator role management
+const roleStatusEl = document.getElementById('roleStatus');
+const roleIconEl = document.getElementById('roleIcon');
+const roleTextEl = document.getElementById('roleText');
+const requestFromNameEl = document.getElementById('requestFromName');
+const requestBtn = document.getElementById('requestBtn');
+const releaseBtn = document.getElementById('releaseBtn');
+const acceptBtn = document.getElementById('acceptBtn');
+const denyBtn = document.getElementById('denyBtn');
+const claimBtn = document.getElementById('claimBtn');
+const requestOverlay = document.getElementById('requestOverlay');
+const cooldownBar = document.getElementById('cooldownBar');
 const allKnobs = document.querySelectorAll('.knob');
 
-function updateSpectatorMode() {
-  if (spectatorMode) {
-    spectatorBtn?.classList.add('active');
+function updateCooldownDisplay() {
+  const now = Date.now();
+  const remaining = requestCooldownEnd - now;
+  
+  if (remaining <= 0) {
+    // Cooldown finished
+    if (cooldownInterval) {
+      clearInterval(cooldownInterval);
+      cooldownInterval = null;
+    }
+    requestBtn?.classList.remove('cooldown');
+    if (cooldownBar) cooldownBar.style.width = '0%';
+    const span = requestBtn?.querySelector('span');
+    if (span) span.textContent = 'Request';
+    return;
+  }
+  
+  // Update cooldown bar and text
+  const percent = (remaining / REQUEST_COOLDOWN_MS) * 100;
+  if (cooldownBar) cooldownBar.style.width = `${percent}%`;
+  const seconds = Math.ceil(remaining / 1000);
+  const span = requestBtn?.querySelector('span');
+  if (span) span.textContent = `${seconds}s`;
+}
+
+function startCooldown() {
+  requestCooldownEnd = Date.now() + REQUEST_COOLDOWN_MS;
+  requestBtn?.classList.add('cooldown');
+  updateCooldownDisplay();
+  
+  if (cooldownInterval) clearInterval(cooldownInterval);
+  cooldownInterval = setInterval(updateCooldownDisplay, 100);
+}
+
+function isOnCooldown() {
+  return Date.now() < requestCooldownEnd;
+}
+
+function updateRoleUI() {
+  if (isOperator) {
+    // We are the operator
+    roleStatusEl?.classList.remove('spectator');
+    roleStatusEl?.classList.add('operator');
+    roleIconEl?.classList.remove('fa-eye');
+    roleIconEl?.classList.add('fa-gamepad');
+    roleTextEl.textContent = `Controlling (${myName})`;
+    
+    // Hide request button, show release button, hide claim button
+    requestBtn?.classList.add('hidden');
+    releaseBtn?.classList.remove('hidden');
+    claimBtn?.classList.add('hidden');
+    
+    // Show/hide request overlay based on pending request
+    if (pendingRequestFrom) {
+      requestFromNameEl.textContent = pendingRequestFrom;
+      requestOverlay?.classList.add('visible');
+    } else {
+      requestOverlay?.classList.remove('visible');
+    }
+    
+    // Enable controls
+    headlightBtn?.classList.remove('disabled');
+    joystick?.classList.remove('disabled');
+    joystickHandle?.classList.remove('disabled');
+    allKnobs.forEach(knob => knob.classList.remove('disabled'));
+  } else {
+    // We are a spectator
+    roleStatusEl?.classList.remove('operator');
+    roleStatusEl?.classList.add('spectator');
+    roleIconEl?.classList.remove('fa-gamepad');
+    roleIconEl?.classList.add('fa-eye');
+    
+    // Hide release button and request overlay for spectators
+    releaseBtn?.classList.add('hidden');
+    requestOverlay?.classList.remove('visible');
+    
+    if (operatorName) {
+      roleTextEl.textContent = `${operatorName} controlling`;
+      requestBtn?.classList.remove('hidden');
+      claimBtn?.classList.add('hidden');
+    } else {
+      roleTextEl.textContent = `No operator`;
+      requestBtn?.classList.add('hidden');
+      claimBtn?.classList.remove('hidden');
+    }
+    
+    // Update request button state based on cooldown and pending
+    if (isOnCooldown()) {
+      requestBtn?.classList.add('cooldown');
+    } else if (requestPending) {
+      requestBtn?.classList.add('pending');
+      requestBtn?.classList.remove('cooldown');
+      const span = requestBtn?.querySelector('span');
+      if (span) span.textContent = 'Waiting...';
+    } else {
+      requestBtn?.classList.remove('pending');
+      requestBtn?.classList.remove('cooldown');
+      const span = requestBtn?.querySelector('span');
+      if (span) span.textContent = 'Request';
+      if (cooldownBar) cooldownBar.style.width = '0%';
+    }
+    
+    // Disable controls
     headlightBtn?.classList.add('disabled');
     joystick?.classList.add('disabled');
     joystickHandle?.classList.add('disabled');
@@ -684,27 +844,147 @@ function updateSpectatorMode() {
       joystickHandle.classList.remove('active');
       joystickHandle.style.transform = 'translate(0, 0)';
     }
-    
-    // Send stop command
-    send('S');
-  } else {
-    spectatorBtn?.classList.remove('active');
-    headlightBtn?.classList.remove('disabled');
-    joystick?.classList.remove('disabled');
-    joystickHandle?.classList.remove('disabled');
-    allKnobs.forEach(knob => knob.classList.remove('disabled'));
   }
 }
 
-function toggleSpectatorMode(e) {
+function handleClaim(e) {
   e.preventDefault();
   e.stopPropagation();
-  spectatorMode = !spectatorMode;
-  updateSpectatorMode();
+  send('CLAIM');
 }
 
-if (spectatorBtn) {
-  // Handle both click and touch events
-  spectatorBtn.addEventListener('click', toggleSpectatorMode);
-  spectatorBtn.addEventListener('touchend', toggleSpectatorMode, { passive: false });
+function handleRequest(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (requestPending || isOnCooldown()) return;
+  requestPending = true;
+  startCooldown();
+  updateRoleUI();
+  send('REQUEST');
+}
+
+function handleRelease(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  send('RELEASE');
+}
+
+function handleAccept(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  send('ACCEPT');
+}
+
+function handleDeny(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  send('DENY');
+}
+
+if (claimBtn) {
+  claimBtn.addEventListener('click', handleClaim);
+  claimBtn.addEventListener('touchend', handleClaim, { passive: false });
+}
+
+if (requestBtn) {
+  requestBtn.addEventListener('click', handleRequest);
+  requestBtn.addEventListener('touchend', handleRequest, { passive: false });
+}
+
+if (releaseBtn) {
+  releaseBtn.addEventListener('click', handleRelease);
+  releaseBtn.addEventListener('touchend', handleRelease, { passive: false });
+}
+
+if (acceptBtn) {
+  acceptBtn.addEventListener('click', handleAccept);
+  acceptBtn.addEventListener('touchend', handleAccept, { passive: false });
+}
+
+if (denyBtn) {
+  denyBtn.addEventListener('click', handleDeny);
+  denyBtn.addEventListener('touchend', handleDeny, { passive: false });
+}
+
+// Version mismatch modal
+function showVersionMismatchModal(serverVersion) {
+  // Stop reconnection attempts
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (pingInterval) {
+    clearInterval(pingInterval);
+    pingInterval = null;
+  }
+  
+  // Create modal overlay
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  `;
+  
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    background: #161b22;
+    border: 2px solid #f85149;
+    border-radius: 12px;
+    padding: 32px;
+    max-width: 400px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  `;
+  
+  modal.innerHTML = `
+    <div style="font-size: 48px; margin-bottom: 16px;">
+      <i class="fa-light fa-triangle-exclamation" style="color: #f85149;"></i>
+    </div>
+    <h2 style="color: #f0f6fc; margin-bottom: 12px; font-size: 20px;">Update Required</h2>
+    <p style="color: #8b949e; margin-bottom: 8px; font-size: 14px;">
+      Your client is outdated and incompatible with the server.
+    </p>
+    <p style="color: #6e7681; margin-bottom: 24px; font-size: 12px;">
+      Your version: <span style="color: #f85149;">${CLIENT_VERSION}</span><br>
+      Server version: <span style="color: #3fb950;">${serverVersion}</span>
+    </p>
+    <button id="reloadBtn" style="
+      background: #1f6feb;
+      border: none;
+      color: #fff;
+      padding: 12px 32px;
+      border-radius: 6px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.2s;
+    ">
+      <i class="fa-light fa-arrows-rotate"></i>
+      Reload Page
+    </button>
+  `;
+  
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  
+  // Add reload button handler
+  document.getElementById('reloadBtn').addEventListener('click', () => {
+    location.reload(true);
+  });
+  
+  // Prevent any interaction with the page behind
+  overlay.addEventListener('click', (e) => {
+    e.stopPropagation();
+  });
 }
