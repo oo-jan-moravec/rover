@@ -1,14 +1,25 @@
 const CLIENT_VERSION = "1.3.0"; // Added cloud relay support
 
 // ===== Cloud Mode Detection =====
-// Cloud mode is enabled via URL parameters: ?cloud=1&relay=https://relay.example.com&key=access-key
+// Cloud mode is auto-detected when served from the cloud relay (not local rover)
+// Can also be forced via URL parameters: ?cloud=1&relay=https://relay.example.com&key=access-key
 const urlParams = new URLSearchParams(window.location.search);
-const CLOUD_MODE = urlParams.get('cloud') === '1';
-const CLOUD_RELAY_URL = urlParams.get('relay') || localStorage.getItem('cloudRelayUrl') || '';
+
+// Auto-detect cloud mode: if served from azurewebsites.net or explicitly set
+const isAzureHost = location.hostname.includes('.azurewebsites.net') || 
+                    location.hostname.includes('.cloudapp.azure.com');
+const explicitCloudMode = urlParams.get('cloud') === '1';
+const CLOUD_MODE = isAzureHost || explicitCloudMode;
+
+// For cloud mode, relay URL is the current host (when auto-detected) or explicit
+const CLOUD_RELAY_URL = isAzureHost 
+  ? `${location.protocol}//${location.host}` 
+  : (urlParams.get('relay') || localStorage.getItem('cloudRelayUrl') || '');
+
 const CLOUD_ACCESS_KEY = urlParams.get('key') || localStorage.getItem('cloudAccessKey') || '';
 
 // Save cloud settings to localStorage for convenience
-if (CLOUD_MODE && CLOUD_RELAY_URL) {
+if (CLOUD_MODE && CLOUD_RELAY_URL && !isAzureHost) {
   localStorage.setItem('cloudRelayUrl', CLOUD_RELAY_URL);
 }
 if (CLOUD_MODE && CLOUD_ACCESS_KEY) {
@@ -18,6 +29,7 @@ if (CLOUD_MODE && CLOUD_ACCESS_KEY) {
 console.log(`Mode: ${CLOUD_MODE ? 'CLOUD' : 'LOCAL'}`);
 if (CLOUD_MODE) {
   console.log(`Cloud relay: ${CLOUD_RELAY_URL}`);
+  console.log(`Auto-detected: ${isAzureHost}`);
 }
 
 const statusEl = document.getElementById("status");
@@ -364,17 +376,26 @@ function connect() {
 }
 
 function connectCloud() {
-  if (!CLOUD_RELAY_URL || !CLOUD_ACCESS_KEY) {
+  if (!CLOUD_ACCESS_KEY) {
+    statusEl.textContent = "Cloud: login required";
+    console.log("Access key required for cloud mode");
+    showLoginOverlay();
+    return;
+  }
+  
+  if (!CLOUD_RELAY_URL) {
     statusEl.textContent = "Cloud: missing config";
-    console.error("Cloud mode requires relay URL and access key");
-    showCloudConfigModal();
+    console.error("Cloud mode requires relay URL");
     return;
   }
 
   statusEl.textContent = "Cloud: connecting...";
   
   try {
-    const clientUrl = CLOUD_RELAY_URL.replace(/\/rover$/, '/client');
+    // If URL ends with /rover, replace with /client; otherwise append /client
+    const clientUrl = CLOUD_RELAY_URL.endsWith('/rover') 
+      ? CLOUD_RELAY_URL.replace(/\/rover$/, '/client')
+      : `${CLOUD_RELAY_URL.replace(/\/$/, '')}/client`;
     hubConnection = new signalR.HubConnectionBuilder()
       .withUrl(`${clientUrl}?accessKey=${encodeURIComponent(CLOUD_ACCESS_KEY)}`)
       .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])
@@ -396,6 +417,9 @@ function connectCloud() {
       } else {
         statusEl.textContent = "Cloud: connected";
         disconnectOverlay?.classList.remove('visible');
+        
+        // Initialize WebRTC video
+        initWebRtcVideo();
       }
     });
 
@@ -403,6 +427,11 @@ function connectCloud() {
       if (data.online) {
         statusEl.textContent = "Cloud: connected";
         disconnectOverlay?.classList.remove('visible');
+        
+        // Initialize WebRTC video if not already done
+        if (!videoInitialized) {
+          initWebRtcVideo();
+        }
       } else {
         statusEl.textContent = "Cloud: rover offline";
         disconnectOverlay?.classList.add('visible');
@@ -419,6 +448,11 @@ function connectCloud() {
 
     hubConnection.on("Telemetry", (telem) => {
       lastPongTime = Date.now();
+      // Debug: log first telemetry received
+      if (!window._telemLogged) {
+        console.log("First telemetry received:", JSON.stringify(telem).substring(0, 500));
+        window._telemLogged = true;
+      }
       handleTelemetry(telem);
     });
 
@@ -630,7 +664,47 @@ function connectLocal() {
   }
 }
 
-// Show modal for cloud configuration
+// Show login overlay for access key
+function showLoginOverlay() {
+  const overlay = document.getElementById('loginOverlay');
+  if (!overlay) return;
+  
+  overlay.style.display = 'flex';
+  
+  const input = document.getElementById('accessKeyInput');
+  const btn = document.getElementById('loginBtn');
+  const error = document.getElementById('loginError');
+  
+  // Focus input
+  setTimeout(() => input?.focus(), 100);
+  
+  // Handle login
+  const doLogin = () => {
+    const key = input?.value?.trim();
+    if (!key) {
+      if (error) {
+        error.textContent = 'Please enter an access key';
+        error.style.display = 'block';
+      }
+      return;
+    }
+    
+    // Save to localStorage and reload with key in URL
+    localStorage.setItem('cloudAccessKey', key);
+    
+    // Redirect with key parameter
+    const url = new URL(location.href);
+    url.searchParams.set('key', key);
+    location.href = url.toString();
+  };
+  
+  btn?.addEventListener('click', doLogin);
+  input?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') doLogin();
+  });
+}
+
+// Show modal for cloud configuration (when relay URL is missing - shouldn't happen when served from cloud)
 function showCloudConfigModal() {
   const overlay = document.createElement('div');
   overlay.id = 'cloudConfigOverlay';
@@ -675,59 +749,177 @@ function showCloudConfigModal() {
   });
 }
 
-// WebRTC handling for cloud video
+// WebRTC handling for cloud video via WHEP
 let peerConnection = null;
+let videoInitialized = false;
 
 function handleWebRtcSignal(signal) {
-  // Handle WebRTC signaling from rover
+  // Handle WebRTC signaling from rover (for ICE candidates)
   console.log("WebRTC signal received:", signal);
-  // Implementation will depend on your video streaming setup
 }
 
-function initWebRtc() {
-  if (!turnConfig || !turnConfig.urls || turnConfig.urls.length === 0) {
-    console.log("No TURN config, skipping WebRTC");
-    return;
-  }
-
-  const config = {
-    iceServers: [{
+async function initWebRtcVideo() {
+  if (videoInitialized) return;
+  
+  console.log("Initializing WebRTC video via WHEP...");
+  
+  // Build ICE server config with STUN and TURN
+  const iceServers = [];
+  
+  // Add STUN servers
+  iceServers.push(
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun.relay.metered.ca:80' }
+  );
+  
+  // Add TURN servers - use provided config or fallback to free Open Relay
+  if (turnConfig && turnConfig.urls && turnConfig.urls.length > 0) {
+    iceServers.push({
       urls: turnConfig.urls,
       username: turnConfig.username,
       credential: turnConfig.credential
-    }]
-  };
+    });
+    console.log("Using configured TURN servers:", turnConfig.urls);
+  } else {
+    // Free Open Relay TURN servers from metered.ca
+    // These are free for testing/development
+    iceServers.push({
+      urls: "turn:global.relay.metered.ca:80",
+      username: "e8dd65b92f7b2ae09c6ce5f5",
+      credential: "uJHoAaKKzxdjt7GW"
+    });
+    iceServers.push({
+      urls: "turn:global.relay.metered.ca:80?transport=tcp",
+      username: "e8dd65b92f7b2ae09c6ce5f5",
+      credential: "uJHoAaKKzxdjt7GW"
+    });
+    iceServers.push({
+      urls: "turn:global.relay.metered.ca:443",
+      username: "e8dd65b92f7b2ae09c6ce5f5",
+      credential: "uJHoAaKKzxdjt7GW"
+    });
+    iceServers.push({
+      urls: "turns:global.relay.metered.ca:443?transport=tcp",
+      username: "e8dd65b92f7b2ae09c6ce5f5",
+      credential: "uJHoAaKKzxdjt7GW"
+    });
+    console.log("Using free Open Relay TURN servers");
+  }
 
-  peerConnection = new RTCPeerConnection(config);
-  
-  peerConnection.ontrack = (event) => {
-    console.log("Received video track");
-    const videoEl = document.getElementById('cameraFeed');
-    if (videoEl && event.streams[0]) {
-      // Replace iframe with video element for WebRTC
-      const video = document.createElement('video');
-      video.id = 'webrtcVideo';
-      video.autoplay = true;
-      video.playsInline = true;
-      video.muted = true;
-      video.srcObject = event.streams[0];
-      video.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain;';
-      videoEl.parentElement.replaceChild(video, videoEl);
+  const config = { iceServers };
+
+  try {
+    peerConnection = new RTCPeerConnection(config);
+    
+    // Add transceiver for receiving video
+    peerConnection.addTransceiver('video', { direction: 'recvonly' });
+    peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+    
+    peerConnection.ontrack = (event) => {
+      console.log("Received media track:", event.track.kind);
+      
+      // Find or create video element
+      let videoEl = document.getElementById('webrtcVideo');
+      if (!videoEl) {
+        const container = document.querySelector('.video-container');
+        const iframe = document.getElementById('cameraFeed');
+        
+        // Hide the iframe
+        if (iframe) {
+          iframe.style.display = 'none';
+        }
+        
+        // Create video element
+        videoEl = document.createElement('video');
+        videoEl.id = 'webrtcVideo';
+        videoEl.autoplay = true;
+        videoEl.playsInline = true;
+        videoEl.muted = true;
+        videoEl.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; background: #000;';
+        container.appendChild(videoEl);
+      }
+      
+      if (event.streams[0]) {
+        videoEl.srcObject = event.streams[0];
+        console.log("Video stream attached");
+      }
+    };
+
+    peerConnection.oniceconnectionstatechange = () => {
+      console.log("ICE connection state:", peerConnection.iceConnectionState);
+      if (peerConnection.iceConnectionState === 'failed') {
+        console.error("ICE connection failed - may need TURN server");
+      }
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+      console.log("Connection state:", peerConnection.connectionState);
+    };
+
+    // Create offer
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+
+    // Wait for ICE gathering to complete (with timeout)
+    await new Promise((resolve) => {
+      if (peerConnection.iceGatheringState === 'complete') {
+        resolve();
+      } else {
+        const checkState = () => {
+          if (peerConnection.iceGatheringState === 'complete') {
+            peerConnection.removeEventListener('icegatheringstatechange', checkState);
+            resolve();
+          }
+        };
+        peerConnection.addEventListener('icegatheringstatechange', checkState);
+        // Timeout after 3 seconds
+        setTimeout(resolve, 3000);
+      }
+    });
+
+    console.log("Sending WHEP offer to cloud relay...");
+
+    // Send offer to cloud relay's WHEP endpoint
+    const whepUrl = `${CLOUD_RELAY_URL}/whep`;
+    const response = await fetch(whepUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sdp',
+      },
+      body: peerConnection.localDescription.sdp
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`WHEP failed: ${response.status} - ${error}`);
     }
-  };
 
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate && hubConnection) {
-      hubConnection.invoke("SendWebRtcSignal", {
-        type: 'ice-candidate',
-        candidate: event.candidate
-      });
+    const answerSdp = await response.text();
+    console.log("Received WHEP answer");
+
+    await peerConnection.setRemoteDescription({
+      type: 'answer',
+      sdp: answerSdp
+    });
+
+    videoInitialized = true;
+    console.log("WebRTC video initialized successfully");
+
+  } catch (error) {
+    console.error("WebRTC video initialization failed:", error);
+    
+    // Show error in video container
+    const container = document.querySelector('.video-container');
+    if (container) {
+      const errorDiv = document.createElement('div');
+      errorDiv.style.cssText = 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #f85149; text-align: center;';
+      errorDiv.innerHTML = `
+        <i class="fa-light fa-video-slash" style="font-size: 48px; margin-bottom: 12px;"></i>
+        <div>Video unavailable</div>
+        <div style="font-size: 12px; color: #8b949e; margin-top: 8px;">${error.message}</div>
+      `;
+      container.appendChild(errorDiv);
     }
-  };
-
-  // Request video from rover
-  if (hubConnection) {
-    hubConnection.invoke("SendWebRtcSignal", { type: 'request-offer' });
   }
 }
 
@@ -737,18 +929,21 @@ function send(msg) {
     if (!hubConnection || hubConnection.state !== signalR.HubConnectionState.Connected) return;
     
     // Parse the message and send appropriate SignalR call
+    // Use .send() for frequent messages (fire-and-forget, no ack wait)
+    // Use .invoke() for messages that need acknowledgment
     if (msg.startsWith("M ")) {
       const parts = msg.split(' ');
       if (parts.length === 3) {
-        hubConnection.invoke("SendMotorCommand", parseInt(parts[1]), parseInt(parts[2]));
+        // Fire-and-forget for motor commands - don't wait for ack
+        hubConnection.send("SendMotorCommand", parseInt(parts[1]), parseInt(parts[2]));
       }
     } else if (msg === "S") {
-      hubConnection.invoke("SendStop");
+      hubConnection.send("SendStop");
     } else if (msg.startsWith("H ")) {
       const on = msg.split(' ')[1] === '1';
-      hubConnection.invoke("SendHeadlight", on);
+      hubConnection.send("SendHeadlight", on);
     } else if (msg === "RESCAN") {
-      hubConnection.invoke("SendRescan");
+      hubConnection.invoke("SendRescan"); // Keep invoke for things that need response
     } else if (msg === "CLAIM") {
       hubConnection.invoke("Claim");
     } else if (msg === "RELEASE") {
@@ -1039,9 +1234,13 @@ const cameraFeed = document.getElementById('cameraFeed');
 const disconnectOverlay = document.getElementById('disconnectOverlay');
 const disconnectStatus = document.getElementById('disconnectStatus');
 
-// Set camera feed source dynamically
-if (cameraFeed) {
+// Set camera feed source dynamically (only in local mode)
+// In cloud mode, video comes via WebRTC, not iframe
+if (cameraFeed && !CLOUD_MODE) {
   cameraFeed.src = `http://${location.hostname}:8889/cam`;
+} else if (cameraFeed && CLOUD_MODE) {
+  // Hide iframe in cloud mode - WebRTC will be used instead
+  cameraFeed.style.display = 'none';
 }
 
 let isSplitterDragging = false;

@@ -6,8 +6,9 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.SignalR.Client;
 
-const string CLIENT_VERSION = "1.2.0"; // Added nearby APs display
+const string CLIENT_VERSION = "1.3.0"; // Added cloud relay support
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
@@ -20,6 +21,7 @@ builder.Services.AddSingleton<WifiMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WifiMonitor>());
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
+builder.Services.AddHostedService<CloudConnector>();
 
 var app = builder.Build();
 
@@ -1602,3 +1604,436 @@ sealed class DiagnosticsPump : BackgroundService
         return -1;
     }
 }
+
+// ===== Cloud Relay Connector =====
+
+sealed class CloudConnector : BackgroundService
+{
+    private readonly RoverState _roverState;
+    private readonly GpioController _gpio;
+    private readonly SafetyStateMachine _safetyMachine;
+    private readonly WifiState _wifiState;
+    private readonly WifiMonitor _wifiMonitor;
+    private readonly IConfiguration _config;
+    private readonly ILogger<CloudConnector> _logger;
+
+    private HubConnection? _hubConnection;
+    private bool _isConnected;
+    private string? _currentOperatorName;
+
+    public CloudConnector(
+        RoverState roverState,
+        GpioController gpio,
+        SafetyStateMachine safetyMachine,
+        WifiState wifiState,
+        WifiMonitor wifiMonitor,
+        IConfiguration config,
+        ILogger<CloudConnector> logger)
+    {
+        _roverState = roverState;
+        _gpio = gpio;
+        _safetyMachine = safetyMachine;
+        _wifiState = wifiState;
+        _wifiMonitor = wifiMonitor;
+        _config = config;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var enabled = _config.GetValue<bool>("CloudRelay:Enabled");
+        if (!enabled)
+        {
+            _logger.LogInformation("Cloud relay is disabled");
+            return;
+        }
+
+        var url = _config["CloudRelay:Url"];
+        var apiKey = _config["CloudRelay:ApiKey"];
+
+        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(apiKey))
+        {
+            _logger.LogWarning("Cloud relay URL or API key not configured");
+            return;
+        }
+
+        _logger.LogInformation("Cloud relay enabled, connecting to {Url}", url);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await ConnectAndRunAsync(url, apiKey, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Cloud relay connection error");
+                _isConnected = false;
+            }
+
+            if (!stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Reconnecting to cloud relay in 5 seconds...");
+                await Task.Delay(5000, stoppingToken);
+            }
+        }
+    }
+
+    private async Task ConnectAndRunAsync(string url, string apiKey, CancellationToken stoppingToken)
+    {
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl($"{url}?apiKey={apiKey}")
+            .WithAutomaticReconnect(new[] { TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10) })
+            .Build();
+
+        // Register handlers for commands from cloud
+        _hubConnection.On<MotorCommandData>("MotorCommand", OnMotorCommand);
+        _hubConnection.On("Stop", OnStop);
+        _hubConnection.On<HeadlightData>("Headlight", OnHeadlight);
+        _hubConnection.On<RescanData>("Rescan", OnRescan);
+        _hubConnection.On<ClientJoinedData>("ClientJoined", OnClientJoined);
+        _hubConnection.On<ClientLeftData>("ClientLeft", OnClientLeft);
+        _hubConnection.On<OperatorChangedData>("OperatorChanged", OnOperatorChanged);
+        _hubConnection.On("OperatorReleased", OnOperatorReleased);
+        _hubConnection.On("OperatorDisconnected", OnOperatorDisconnected);
+        _hubConnection.On<WebRtcSignalData>("WebRtcSignal", OnWebRtcSignal);
+        _hubConnection.On<WhepRequestData>("WhepRequest", OnWhepRequest);
+
+        _hubConnection.Reconnecting += error =>
+        {
+            _logger.LogWarning("Cloud relay reconnecting: {Error}", error?.Message);
+            _isConnected = false;
+            return Task.CompletedTask;
+        };
+
+        _hubConnection.Reconnected += connectionId =>
+        {
+            _logger.LogInformation("Cloud relay reconnected: {ConnectionId}", connectionId);
+            _isConnected = true;
+            return Task.CompletedTask;
+        };
+
+        _hubConnection.Closed += error =>
+        {
+            _logger.LogWarning("Cloud relay closed: {Error}", error?.Message);
+            _isConnected = false;
+            return Task.CompletedTask;
+        };
+
+        await _hubConnection.StartAsync(stoppingToken);
+        _isConnected = true;
+        _logger.LogInformation("Connected to cloud relay");
+
+        // Start telemetry pump to cloud
+        _ = TelemetryPumpAsync(stoppingToken);
+
+        // Wait until cancelled
+        await Task.Delay(Timeout.Infinite, stoppingToken);
+    }
+
+    private async Task TelemetryPumpAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Starting cloud telemetry pump");
+        
+        var updateCounter = 0;
+        var ping = new System.Net.NetworkInformation.Ping();
+        long lastPingMs = -1;
+        List<WifiMonitor.NearbyAp> nearbyAps = new();
+
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested && _isConnected && _hubConnection?.State == HubConnectionState.Connected)
+            {
+                try
+                {
+                // Evaluate safety state
+                var (safetyState, _, _) = _safetyMachine.Evaluate();
+
+                // Get system info
+                var cpuTemp = GetCpuTemp();
+
+                // Ping every 8th iteration
+                if (updateCounter % 8 == 0)
+                {
+                    try
+                    {
+                        var reply = await ping.SendPingAsync("8.8.8.8", 1000);
+                        lastPingMs = reply.Status == System.Net.NetworkInformation.IPStatus.Success ? reply.RoundtripTime : -1;
+                    }
+                    catch { lastPingMs = -1; }
+                }
+
+                // Get Wi-Fi state
+                var (rssi, bssid, ssid, freq, txMbps, rxMbps, connected, lastUpdate, lastRoam, avgRtt) = _wifiState.Get();
+                var (_, motorsInhibited, lastStopReason) = _safetyMachine.GetStatus();
+
+                // Scan nearby APs every 20th iteration
+                if (updateCounter % 20 == 0)
+                {
+                    try { nearbyAps = await _wifiMonitor.GetNearbyApsAsync(ssid); }
+                    catch { }
+                }
+
+                var wifiSignalPercent = connected ? Math.Clamp((int)((rssi + 100) * 100.0 / 70.0), 0, 100) : 0;
+
+                var telemetry = new
+                {
+                    wifi = new
+                    {
+                        state = safetyState.ToString(),
+                        connected,
+                        rssiDbm = rssi,
+                        bssid,
+                        ssid,
+                        freqMhz = freq,
+                        txBitrateMbps = txMbps,
+                        rxBitrateMbps = rxMbps,
+                        signalPercent = wifiSignalPercent,
+                        nearbyAps = nearbyAps.Select(ap => new
+                        {
+                            bssid = ap.Bssid,
+                            ssid = ap.Ssid,
+                            rssiDbm = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase) ? rssi : ap.RssiDbm,
+                            isCurrent = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase)
+                        })
+                    },
+                    motors = new
+                    {
+                        inhibited = motorsInhibited,
+                        lastStopReason
+                    },
+                    system = new
+                    {
+                        cpuTempC = cpuTemp,
+                        pingMs = lastPingMs
+                    }
+                };
+
+                await _hubConnection.InvokeAsync("SendTelemetry", telemetry, stoppingToken);
+                updateCounter++;
+            }
+            catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Error sending telemetry to cloud");
+                }
+
+                await Task.Delay(250, stoppingToken); // 4Hz
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Cloud telemetry pump crashed");
+        }
+        
+        _logger.LogWarning("Cloud telemetry pump stopped. Connected: {Connected}, HubState: {State}", 
+            _isConnected, _hubConnection?.State);
+    }
+
+    private double GetCpuTemp()
+    {
+        try
+        {
+            if (File.Exists("/sys/class/thermal/thermal_zone0/temp"))
+            {
+                var tempStr = File.ReadAllText("/sys/class/thermal/thermal_zone0/temp").Trim();
+                if (double.TryParse(tempStr, out var temp))
+                    return temp / 1000.0;
+            }
+        }
+        catch { }
+        return 0;
+    }
+
+    // Command handlers
+    private void OnMotorCommand(MotorCommandData data)
+    {
+        if (_safetyMachine.AreMotorsInhibited()) return;
+        _roverState.Touch();
+        _roverState.Set(Clamp(data.Left), Clamp(data.Right));
+    }
+
+    private void OnStop()
+    {
+        _roverState.Set(0, 0);
+    }
+
+    private void OnHeadlight(HeadlightData data)
+    {
+        _gpio.SetHeadlight(data.On);
+    }
+
+    private async void OnRescan(RescanData data)
+    {
+        try
+        {
+            if (_hubConnection?.State == HubConnectionState.Connected)
+            {
+                await _hubConnection.InvokeAsync("SendToClient", data.ClientConnectionId, "RescanResult", new { result = "started" });
+            }
+
+            var result = await TriggerRescanAndRoamAsync();
+
+            if (_hubConnection?.State == HubConnectionState.Connected)
+            {
+                await _hubConnection.InvokeAsync("SendToClient", data.ClientConnectionId, "RescanResult", new { result });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Rescan error");
+        }
+    }
+
+    private void OnClientJoined(ClientJoinedData data)
+    {
+        _logger.LogInformation("Cloud client joined: {Name}", data.Name);
+    }
+
+    private void OnClientLeft(ClientLeftData data)
+    {
+        _logger.LogInformation("Cloud client left: {ConnectionId}", data.ConnectionId);
+    }
+
+    private void OnOperatorChanged(OperatorChangedData data)
+    {
+        _currentOperatorName = data.Name;
+        _logger.LogInformation("Cloud operator changed: {Name}", data.Name);
+    }
+
+    private void OnOperatorReleased()
+    {
+        _currentOperatorName = null;
+        _roverState.Set(0, 0);
+        _logger.LogInformation("Cloud operator released");
+    }
+
+    private void OnOperatorDisconnected()
+    {
+        _currentOperatorName = null;
+        _roverState.Set(0, 0);
+        _logger.LogInformation("Cloud operator disconnected");
+    }
+
+    private void OnWebRtcSignal(WebRtcSignalData data)
+    {
+        // WebRTC signaling for video - to be implemented with camera integration
+        _logger.LogDebug("Received WebRTC signal from client {ClientId}", data.ClientConnectionId);
+    }
+
+    private async void OnWhepRequest(WhepRequestData data)
+    {
+        _logger.LogInformation("Received WHEP request: {RequestId}", data.RequestId);
+
+        try
+        {
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(15);
+
+            // Get the local WHEP URL from config or use default
+            var whepUrl = _config["CloudRelay:LocalWhepUrl"] ?? "http://127.0.0.1:8889/cam/whep";
+
+            // Forward the SDP offer to local mediamtx
+            var content = new StringContent(data.SdpOffer, Encoding.UTF8, "application/sdp");
+            var response = await httpClient.PostAsync(whepUrl, content);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                _logger.LogError("Local WHEP failed: {StatusCode} - {Error}", response.StatusCode, error);
+
+                if (_hubConnection?.State == HubConnectionState.Connected)
+                {
+                    await _hubConnection.InvokeAsync("WhepResponse", data.RequestId, false, null, $"WHEP failed: {response.StatusCode}");
+                }
+                return;
+            }
+
+            var sdpAnswer = await response.Content.ReadAsStringAsync();
+            _logger.LogInformation("WHEP success, got SDP answer");
+
+            if (_hubConnection?.State == HubConnectionState.Connected)
+            {
+                await _hubConnection.InvokeAsync("WhepResponse", data.RequestId, true, sdpAnswer, null);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "WHEP request error");
+
+            if (_hubConnection?.State == HubConnectionState.Connected)
+            {
+                try
+                {
+                    await _hubConnection.InvokeAsync("WhepResponse", data.RequestId, false, null, ex.Message);
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static int Clamp(int v) => Math.Max(-255, Math.Min(255, v));
+
+    private static async Task<string> TriggerRescanAndRoamAsync()
+    {
+        // Same implementation as the static method in Program.cs
+        // Abbreviated here - in real code, extract to shared method
+        try
+        {
+            var downPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/ifconfig",
+                Arguments = "wlan0 down",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var downProcess = Process.Start(downPsi))
+            {
+                if (downProcess != null) await downProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(1500);
+
+            var upPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/ifconfig",
+                Arguments = "wlan0 up",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var upProcess = Process.Start(upPsi))
+            {
+                if (upProcess != null) await upProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(3000);
+            return "completed";
+        }
+        catch (Exception ex)
+        {
+            return $"error:{ex.Message}";
+        }
+    }
+
+    public override void Dispose()
+    {
+        _hubConnection?.DisposeAsync().AsTask().Wait();
+        base.Dispose();
+    }
+}
+
+// DTOs for SignalR messages
+record MotorCommandData(int Left, int Right);
+record HeadlightData(bool On);
+record RescanData(string ClientConnectionId);
+record ClientJoinedData(string ConnectionId, string Name);
+record ClientLeftData(string ConnectionId);
+record OperatorChangedData(string Name);
+record WebRtcSignalData(string ClientConnectionId, object Signal);
+record WhepRequestData(string RequestId, string SdpOffer, object? TurnConfig);
+record TurnConfigData(string[] Urls, string Username, string Credential);
