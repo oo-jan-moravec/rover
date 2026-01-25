@@ -316,7 +316,7 @@ joystickHandle.addEventListener("touchstart", (e) => {
 }, { passive: false });
 
 window.addEventListener("touchmove", (e) => {
-  if (isDragging && e.touches.length > 0) {
+  if (isDragging && e.touches.length > 0 && !spectatorMode) {
     e.preventDefault();
     const touch = e.touches[0];
     handleJoystickMove(touch.clientX, touch.clientY);
@@ -324,14 +324,14 @@ window.addEventListener("touchmove", (e) => {
 }, { passive: false });
 
 window.addEventListener("touchend", (e) => {
-  if (isDragging) {
+  if (isDragging || spectatorMode) {
     e.preventDefault();
     resetJoystick();
   }
 }, { passive: false });
 
 window.addEventListener("touchcancel", () => {
-  if (isDragging) resetJoystick();
+  if (isDragging || spectatorMode) resetJoystick();
 });
 
 // Pointer events for better cross-device support
@@ -345,13 +345,13 @@ joystickHandle.addEventListener("pointerdown", (e) => {
 });
 
 window.addEventListener("pointermove", (e) => {
-  if (isDragging && e.pointerType !== "mouse") {
+  if (isDragging && e.pointerType !== "mouse" && !spectatorMode) {
     handleJoystickMove(e.clientX, e.clientY);
   }
 });
 
 window.addEventListener("pointerup", (e) => {
-  if (isDragging && e.pointerType !== "mouse") {
+  if (isDragging && e.pointerType !== "mouse" || spectatorMode) {
     resetJoystick();
   }
 });
@@ -632,25 +632,32 @@ setupKnob(
 const headlightBtn = document.getElementById('headlightBtn');
 const headlightIcon = headlightBtn?.querySelector('.control-icon');
 
-if (headlightBtn) {
-  headlightBtn.addEventListener('click', () => {
-    if (spectatorMode) return;
-    headlightOn = !headlightOn;
-    if (headlightOn) {
-      headlightBtn.classList.add('active');
-      if (headlightIcon) {
-        headlightIcon.classList.remove('fa-lightbulb');
-        headlightIcon.classList.add('fa-lightbulb-on');
-      }
-    } else {
-      headlightBtn.classList.remove('active');
-      if (headlightIcon) {
-        headlightIcon.classList.remove('fa-lightbulb-on');
-        headlightIcon.classList.add('fa-lightbulb');
-      }
+function toggleHeadlight(e) {
+  if (spectatorMode) return;
+  e.preventDefault();
+  e.stopPropagation();
+  
+  headlightOn = !headlightOn;
+  if (headlightOn) {
+    headlightBtn.classList.add('active');
+    if (headlightIcon) {
+      headlightIcon.classList.remove('fa-lightbulb');
+      headlightIcon.classList.add('fa-lightbulb-on');
     }
-    send(`H ${headlightOn ? 1 : 0}`);
-  });
+  } else {
+    headlightBtn.classList.remove('active');
+    if (headlightIcon) {
+      headlightIcon.classList.remove('fa-lightbulb-on');
+      headlightIcon.classList.add('fa-lightbulb');
+    }
+  }
+  send(`H ${headlightOn ? 1 : 0}`);
+}
+
+if (headlightBtn) {
+  // Handle both click and touch events
+  headlightBtn.addEventListener('click', toggleHeadlight);
+  headlightBtn.addEventListener('touchend', toggleHeadlight, { passive: false });
 }
 
 // Spectator mode control
@@ -663,22 +670,41 @@ function updateSpectatorMode() {
     spectatorBtn?.classList.add('active');
     headlightBtn?.classList.add('disabled');
     joystick?.classList.add('disabled');
+    joystickHandle?.classList.add('disabled');
     allKnobs.forEach(knob => knob.classList.add('disabled'));
     
-    // Reset joystick and send stop command
-    resetJoystick();
+    // Force reset all interaction states
+    isDragging = false;
+    joystickActive = false;
+    joystickLeft = 0;
+    joystickRight = 0;
+    
+    // Reset joystick visual position
+    if (joystickHandle) {
+      joystickHandle.classList.remove('active');
+      joystickHandle.style.transform = 'translate(0, 0)';
+    }
+    
+    // Send stop command
     send('S');
   } else {
     spectatorBtn?.classList.remove('active');
     headlightBtn?.classList.remove('disabled');
     joystick?.classList.remove('disabled');
+    joystickHandle?.classList.remove('disabled');
     allKnobs.forEach(knob => knob.classList.remove('disabled'));
   }
 }
 
+function toggleSpectatorMode(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  spectatorMode = !spectatorMode;
+  updateSpectatorMode();
+}
+
 if (spectatorBtn) {
-  spectatorBtn.addEventListener('click', () => {
-    spectatorMode = !spectatorMode;
-    updateSpectatorMode();
-  });
+  // Handle both click and touch events
+  spectatorBtn.addEventListener('click', toggleSpectatorMode);
+  spectatorBtn.addEventListener('touchend', toggleSpectatorMode, { passive: false });
 }
