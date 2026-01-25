@@ -94,6 +94,9 @@ function connect() {
       reconnectAttempts = 0; // Reset counter on successful connection
       lastPongTime = Date.now();
       
+      // Hide disconnect overlay
+      disconnectOverlay?.classList.remove('visible');
+      
       // Send version handshake first
       send(`VERSION:${CLIENT_VERSION}`);
       
@@ -110,12 +113,25 @@ function connect() {
       const delay = Math.min(500 * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
       reconnectAttempts++;
       statusEl.textContent = `WS: disconnected (retry ${reconnectAttempts} in ${(delay/1000).toFixed(1)}s)`;
+      
+      // Show disconnect overlay
+      disconnectOverlay?.classList.add('visible');
+      if (disconnectStatus) {
+        disconnectStatus.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s... (attempt ${reconnectAttempts})`;
+      }
+      
       reconnectTimer = setTimeout(connect, delay);
     };
     
     ws.onerror = (error) => {
       console.error("WebSocket error:", error);
       statusEl.textContent = "WS: error";
+      
+      // Show disconnect overlay
+      disconnectOverlay?.classList.add('visible');
+      if (disconnectStatus) {
+        disconnectStatus.textContent = "Connection error";
+      }
     };
     
     ws.onmessage = (event) => {
@@ -415,6 +431,8 @@ tick();
 const mobileSplitter = document.getElementById('mobileSplitter');
 const mainGrid = document.querySelector('.main-grid');
 const cameraFeed = document.getElementById('cameraFeed');
+const disconnectOverlay = document.getElementById('disconnectOverlay');
+const disconnectStatus = document.getElementById('disconnectStatus');
 
 // Set camera feed source dynamically
 if (cameraFeed) {

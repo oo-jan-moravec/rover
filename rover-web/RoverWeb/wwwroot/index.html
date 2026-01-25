@@ -2,10 +2,10 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width,initial-scale=1"
-    />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Rover Control</title>
     <script src="https://kit.fontawesome.com/1d4131bbf4.js" crossorigin="anonymous"></script>
     <style>
@@ -149,6 +149,42 @@
         align-items: center;
         gap: 8px;
         position: relative;
+      }
+      /* Disconnect overlay - centered on video */
+      .disconnect-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(15, 20, 25, 0.9);
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        z-index: 90;
+      }
+      .disconnect-overlay.visible {
+        display: flex;
+      }
+      .disconnect-icon {
+        font-size: 48px;
+        color: #f85149;
+        animation: pulse 2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+      .disconnect-title {
+        font-size: 24px;
+        font-weight: 600;
+        color: #f85149;
+      }
+      .disconnect-status {
+        font-size: 14px;
+        color: #8b949e;
       }
       /* Request overlay - centered on video */
       .request-overlay {
@@ -634,6 +670,13 @@
             id="cameraFeed"
             allow="autoplay; fullscreen; microphone; camera"
           ></iframe>
+          <div class="disconnect-overlay" id="disconnectOverlay">
+            <div class="disconnect-icon">
+              <i class="fa-light fa-wifi-slash"></i>
+            </div>
+            <div class="disconnect-title">Disconnected</div>
+            <div class="disconnect-status" id="disconnectStatus">Reconnecting...</div>
+          </div>
           <div class="request-overlay" id="requestOverlay">
             <div class="request-overlay-title">
               <i class="fa-light fa-hand"></i>
@@ -855,6 +898,6 @@
       </div>
     </div>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=1.0.0"></script>
   </body>
 </html>
