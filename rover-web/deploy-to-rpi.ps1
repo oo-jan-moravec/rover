@@ -137,6 +137,39 @@ ssh "${RpiUser}@${RpiHost}" "sudo systemctl start rover-web.service"
 # Wait a moment for service to start
 Start-Sleep -Seconds 2
 
+# Deploy and install Wi-Fi roaming watchdog
+Write-Host ""
+Write-ColorOutput "========================================" "Cyan"
+Write-ColorOutput "  Installing Wi-Fi Roaming Watchdog" "Cyan"
+Write-ColorOutput "========================================" "Cyan"
+Write-Host ""
+
+$wifiScriptsDir = Join-Path $scriptPath ""
+$watchdogScript = Join-Path $wifiScriptsDir "wifi-roam-watchdog.sh"
+$installerScript = Join-Path $wifiScriptsDir "install-wifi-watchdog.sh"
+
+if ((Test-Path $watchdogScript) -and (Test-Path $installerScript)) {
+    Write-ColorOutput "Uploading Wi-Fi watchdog scripts..." "Yellow"
+    scp "$watchdogScript" "${RpiUser}@${RpiHost}:/tmp/wifi-roam-watchdog.sh"
+    scp "$installerScript" "${RpiUser}@${RpiHost}:/tmp/install-wifi-watchdog.sh"
+    
+    Write-ColorOutput "Installing Wi-Fi watchdog service..." "Yellow"
+    ssh "${RpiUser}@${RpiHost}" "chmod +x /tmp/install-wifi-watchdog.sh /tmp/wifi-roam-watchdog.sh"
+    ssh "${RpiUser}@${RpiHost}" "cd /tmp && sudo ./install-wifi-watchdog.sh"
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-ColorOutput "✓ Wi-Fi watchdog installed successfully" "Green"
+    } else {
+        Write-ColorOutput "Warning: Wi-Fi watchdog installation may have failed" "Yellow"
+    }
+} else {
+    Write-ColorOutput "Wi-Fi watchdog scripts not found, skipping..." "Yellow"
+    Write-Host "  Expected: $watchdogScript"
+    Write-Host "  Expected: $installerScript"
+}
+
+Write-Host ""
+
 # Check service status
 Write-Host ""
 Write-ColorOutput "========================================" "Green"
@@ -144,14 +177,25 @@ Write-ColorOutput "  Deployment Complete!" "Green"
 Write-ColorOutput "========================================" "Green"
 Write-Host ""
 
+Write-ColorOutput "Rover Web Service Status:" "Cyan"
 ssh "${RpiUser}@${RpiHost}" "sudo systemctl status rover-web.service --no-pager" 2>&1 | Out-Host
 
 Write-Host ""
+Write-ColorOutput "Wi-Fi Watchdog Service Status:" "Cyan"
+ssh "${RpiUser}@${RpiHost}" "sudo systemctl status wifi-roam-watchdog.service --no-pager 2>/dev/null || echo 'Not installed'" 2>&1 | Out-Host
+
+Write-Host ""
 Write-ColorOutput "Useful commands:" "Green"
-Write-Host "  Check status:  ssh ${RpiUser}@${RpiHost} 'sudo systemctl status rover-web.service'"
-Write-Host "  View logs:     ssh ${RpiUser}@${RpiHost} 'sudo journalctl -u rover-web.service -f'"
-Write-Host "  Restart:       ssh ${RpiUser}@${RpiHost} 'sudo systemctl restart rover-web.service'"
-Write-Host "  Stop:          ssh ${RpiUser}@${RpiHost} 'sudo systemctl stop rover-web.service'"
+Write-Host ""
+Write-ColorOutput "  Rover Web Service:" "Cyan"
+Write-Host "    Check status:  ssh ${RpiUser}@${RpiHost} 'sudo systemctl status rover-web.service'"
+Write-Host "    View logs:     ssh ${RpiUser}@${RpiHost} 'sudo journalctl -u rover-web.service -f'"
+Write-Host "    Restart:       ssh ${RpiUser}@${RpiHost} 'sudo systemctl restart rover-web.service'"
+Write-Host ""
+Write-ColorOutput "  Wi-Fi Watchdog:" "Cyan"
+Write-Host "    Check status:  ssh ${RpiUser}@${RpiHost} 'sudo systemctl status wifi-roam-watchdog'"
+Write-Host "    View logs:     ssh ${RpiUser}@${RpiHost} 'sudo journalctl -u wifi-roam-watchdog -f'"
+Write-Host "    Edit config:   ssh ${RpiUser}@${RpiHost} 'sudo nano /etc/default/wifi-roam-watchdog'"
 Write-Host ""
 Write-ColorOutput "Access the web interface at: http://${RpiHost}:8080" "Green"
 Write-Host ""

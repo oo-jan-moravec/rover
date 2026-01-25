@@ -7,7 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-const string CLIENT_VERSION = "1.1.0"; // Bumped for Wi-Fi safety features
+const string CLIENT_VERSION = "1.2.0"; // Added nearby APs display
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
@@ -16,7 +16,8 @@ builder.Services.AddSingleton<OperatorManager>();
 builder.Services.AddSingleton<GpioController>();
 builder.Services.AddSingleton<WifiState>();
 builder.Services.AddSingleton<SafetyStateMachine>();
-builder.Services.AddHostedService<WifiMonitor>();
+builder.Services.AddSingleton<WifiMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<WifiMonitor>());
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
 
@@ -205,6 +206,23 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                         gpio.SetHeadlight(state_val == 1);
                     }
                 }
+                else if (msg == "RESCAN")
+                {
+                    // Trigger Wi-Fi rescan and connect to best AP
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await wsManager.SendToClientAsync(clientId, "RESCAN:started");
+                            var result = await TriggerRescanAndRoamAsync();
+                            await wsManager.SendToClientAsync(clientId, $"RESCAN:{result}");
+                        }
+                        catch (Exception ex)
+                        {
+                            await wsManager.SendToClientAsync(clientId, $"RESCAN:error:{ex.Message}");
+                        }
+                    });
+                }
             }
         }
     }
@@ -232,6 +250,161 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
 app.Run("http://0.0.0.0:8080");
 
 static int Clamp(int v) => Math.Max(-255, Math.Min(255, v));
+
+/// <summary>
+/// Trigger a Wi-Fi rescan and roam to the best available AP
+/// </summary>
+static async Task<string> TriggerRescanAndRoamAsync()
+{
+    try
+    {
+        // Trigger scan
+        var scanPsi = new ProcessStartInfo
+        {
+            FileName = "/usr/sbin/wpa_cli",
+            Arguments = "-i wlan0 scan",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        
+        using (var scanProcess = Process.Start(scanPsi))
+        {
+            if (scanProcess != null)
+                await scanProcess.WaitForExitAsync();
+        }
+        
+        await Task.Delay(1500); // Wait for scan to complete
+        
+        // Get current connection info
+        var linkPsi = new ProcessStartInfo
+        {
+            FileName = "/usr/sbin/iw",
+            Arguments = "dev wlan0 link",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        
+        string currentBssid = "";
+        string currentSsid = "";
+        int currentRssi = -100;
+        
+        using (var linkProcess = Process.Start(linkPsi))
+        {
+            if (linkProcess != null)
+            {
+                var linkOutput = await linkProcess.StandardOutput.ReadToEndAsync();
+                await linkProcess.WaitForExitAsync();
+                
+                var bssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"Connected to ([0-9a-fA-F:]+)");
+                if (bssidMatch.Success)
+                    currentBssid = bssidMatch.Groups[1].Value.ToUpper();
+                
+                var ssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"SSID: (.+)");
+                if (ssidMatch.Success)
+                    currentSsid = ssidMatch.Groups[1].Value.Trim();
+                
+                var signalMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"signal: (-?\d+)");
+                if (signalMatch.Success && int.TryParse(signalMatch.Groups[1].Value, out var rssi))
+                    currentRssi = rssi;
+            }
+        }
+        
+        // Get scan results
+        var resultsPsi = new ProcessStartInfo
+        {
+            FileName = "/usr/sbin/wpa_cli",
+            Arguments = "-i wlan0 scan_results",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        
+        string bestBssid = "";
+        int bestRssi = -100;
+        
+        using (var resultsProcess = Process.Start(resultsPsi))
+        {
+            if (resultsProcess != null)
+            {
+                var resultsOutput = await resultsProcess.StandardOutput.ReadToEndAsync();
+                await resultsProcess.WaitForExitAsync();
+                
+                var lines = resultsOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines.Skip(1))
+                {
+                    var parts = line.Split('\t');
+                    if (parts.Length >= 4)
+                    {
+                        var ssid = parts.Length >= 5 ? parts[4].Trim() : "";
+                        
+                        // Only consider APs with same SSID or empty SSID (mesh nodes)
+                        if (!string.IsNullOrEmpty(currentSsid) && 
+                            ssid != currentSsid && !string.IsNullOrEmpty(ssid))
+                            continue;
+                        
+                        if (int.TryParse(parts[2], out var apRssi) && apRssi > bestRssi)
+                        {
+                            bestRssi = apRssi;
+                            bestBssid = parts[0].ToUpper();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check if we should roam
+        if (string.IsNullOrEmpty(bestBssid))
+        {
+            return "no_aps_found";
+        }
+        
+        if (bestBssid.Equals(currentBssid, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"already_best:{bestRssi}";
+        }
+        
+        if (bestRssi <= currentRssi + 3) // Need at least 3dB improvement
+        {
+            return $"no_better_ap:{currentRssi}:{bestRssi}";
+        }
+        
+        // Roam to best AP
+        var roamPsi = new ProcessStartInfo
+        {
+            FileName = "/usr/sbin/wpa_cli",
+            Arguments = $"-i wlan0 roam {bestBssid}",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        
+        using (var roamProcess = Process.Start(roamPsi))
+        {
+            if (roamProcess != null)
+            {
+                var roamOutput = await roamProcess.StandardOutput.ReadToEndAsync();
+                await roamProcess.WaitForExitAsync();
+                
+                if (roamOutput.Contains("OK"))
+                {
+                    return $"roamed:{bestBssid}:{bestRssi}";
+                }
+                else
+                {
+                    return $"roam_failed:{roamOutput.Trim()}";
+                }
+            }
+        }
+        
+        return "unknown_error";
+    }
+    catch (Exception ex)
+    {
+        return $"error:{ex.Message}";
+    }
+}
 
 sealed class WebSocketManager
 {
@@ -895,20 +1068,34 @@ sealed class SafetyStateMachine
             }
             else if (rssi <= RSSI_CRITICAL_THRESHOLD)
             {
-                // Critical RSSI - immediate degraded
-                if (_currentState == SafetyState.OK)
+                // Critical RSSI - immediate degraded (from OK or OFFLINE)
+                if (_currentState == SafetyState.OK || _currentState == SafetyState.OFFLINE)
                 {
+                    if (_currentState == SafetyState.OFFLINE)
+                    {
+                        _logger?.LogInformation($"Safety: Transition OFFLINE → DEGRADED - Connected but critical RSSI {rssi} dBm");
+                    }
+                    else
+                    {
+                        _logger?.LogWarning($"Safety: Transition to DEGRADED - Critical RSSI {rssi} dBm");
+                    }
                     _currentState = SafetyState.DEGRADED;
                     _degradedSince = DateTime.UtcNow;
-                    _logger?.LogWarning($"Safety: Transition to DEGRADED - Critical RSSI {rssi} dBm");
                 }
             }
             else if (rssi <= RSSI_DEGRADED_THRESHOLD || avgRtt > RTT_DEGRADED_THRESHOLD)
             {
                 // Check if we should transition to DEGRADED
-                if (_currentState == SafetyState.OK)
+                if (_currentState == SafetyState.OK || _currentState == SafetyState.OFFLINE)
                 {
-                    if (_degradedSince == DateTime.MinValue)
+                    if (_currentState == SafetyState.OFFLINE)
+                    {
+                        // When coming from OFFLINE, go to DEGRADED immediately (we're connected!)
+                        _currentState = SafetyState.DEGRADED;
+                        _degradedSince = DateTime.UtcNow;
+                        _logger?.LogInformation($"Safety: Transition OFFLINE → DEGRADED - Connected, RSSI {rssi} dBm");
+                    }
+                    else if (_degradedSince == DateTime.MinValue)
                     {
                         _degradedSince = DateTime.UtcNow;
                     }
@@ -1115,19 +1302,111 @@ sealed class WifiMonitor : BackgroundService
         public double RxMbps { get; set; } = 0;
         public bool IsConnected { get; set; } = false;
     }
+    
+    /// <summary>
+    /// Get list of nearby APs from wpa_cli scan_results (called less frequently)
+    /// </summary>
+    public async Task<List<NearbyAp>> GetNearbyApsAsync(string currentSsid)
+    {
+        var aps = new List<NearbyAp>();
+        
+        try
+        {
+            // Trigger a scan first
+            var scanPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = "-i wlan0 scan",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            
+            using (var scanProcess = Process.Start(scanPsi))
+            {
+                if (scanProcess != null)
+                    await scanProcess.WaitForExitAsync();
+            }
+            
+            await Task.Delay(800); // Wait for scan to complete
+            
+            // Get scan results
+            var psi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = "-i wlan0 scan_results",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            
+            using var process = Process.Start(psi);
+            if (process != null)
+            {
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+                
+                // Parse: bssid / frequency / signal level / flags / ssid
+                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines.Skip(1)) // Skip header
+                {
+                    var parts = line.Split('\t');
+                    if (parts.Length >= 4)
+                    {
+                        var apSsid = parts.Length >= 5 ? parts[4].Trim() : "";
+                        
+                        // Only include APs with matching SSID or empty SSID (mesh nodes)
+                        // Use case-insensitive comparison
+                        if (!string.IsNullOrEmpty(currentSsid) && 
+                            !apSsid.Equals(currentSsid, StringComparison.OrdinalIgnoreCase) && 
+                            !string.IsNullOrEmpty(apSsid))
+                            continue;
+                        
+                        if (int.TryParse(parts[2], out var apRssi))
+                        {
+                            aps.Add(new NearbyAp
+                            {
+                                Bssid = parts[0].ToUpper(),
+                                FreqMhz = int.TryParse(parts[1], out var f) ? f : 0,
+                                RssiDbm = apRssi,
+                                Ssid = apSsid
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting nearby APs");
+        }
+        
+        // Sort by signal strength (best first)
+        return aps.OrderByDescending(a => a.RssiDbm).Take(5).ToList();
+    }
+    
+    public record NearbyAp
+    {
+        public string Bssid { get; set; } = "";
+        public string Ssid { get; set; } = "";
+        public int RssiDbm { get; set; } = -100;
+        public int FreqMhz { get; set; } = 0;
+    }
 }
 
 sealed class DiagnosticsPump : BackgroundService
 {
     private readonly WebSocketManager _wsManager;
     private readonly WifiState _wifiState;
+    private readonly WifiMonitor _wifiMonitor;
     private readonly SafetyStateMachine _safetyMachine;
     private readonly ILogger<DiagnosticsPump> _logger;
 
-    public DiagnosticsPump(WebSocketManager wsManager, WifiState wifiState, SafetyStateMachine safetyMachine, ILogger<DiagnosticsPump> logger)
+    public DiagnosticsPump(WebSocketManager wsManager, WifiState wifiState, WifiMonitor wifiMonitor, SafetyStateMachine safetyMachine, ILogger<DiagnosticsPump> logger)
     {
         _wsManager = wsManager;
         _wifiState = wifiState;
+        _wifiMonitor = wifiMonitor;
         _safetyMachine = safetyMachine;
         _logger = logger;
     }
@@ -1137,6 +1416,7 @@ sealed class DiagnosticsPump : BackgroundService
         var ping = new System.Net.NetworkInformation.Ping();
         var updateCounter = 0;
         long lastPingMs = -1; // Cache last ping result
+        List<WifiMonitor.NearbyAp> nearbyAps = new(); // Cache nearby APs
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -1163,8 +1443,27 @@ sealed class DiagnosticsPump : BackgroundService
                 var (rssi, bssid, ssid, freq, txMbps, rxMbps, connected, lastUpdate, lastRoam, avgRtt) = _wifiState.Get();
                 var (_, motorsInhibited, lastStopReason) = _safetyMachine.GetStatus();
                 
+                // Scan for nearby APs every ~5 seconds (20 iterations at 4Hz)
+                if (updateCounter % 20 == 0)
+                {
+                    try
+                    {
+                        nearbyAps = await _wifiMonitor.GetNearbyApsAsync(ssid);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error scanning nearby APs");
+                    }
+                }
+                
                 // Calculate Wi-Fi signal percentage for backwards compatibility (0-100%)
                 var wifiSignalPercent = connected ? Math.Clamp((int)((rssi + 100) * 100.0 / 70.0), 0, 100) : 0;
+                
+                // Check if a better AP is available (not the current one, and significantly stronger)
+                var betterApAvailable = nearbyAps
+                    .Where(ap => ap.Bssid != bssid && ap.RssiDbm > rssi + 8)
+                    .OrderByDescending(ap => ap.RssiDbm)
+                    .FirstOrDefault();
                 
                 // Send full telemetry at 2-5 Hz (every 200-500ms), we'll do 4Hz
                 // Format: TELEM:JSON
@@ -1173,6 +1472,7 @@ sealed class DiagnosticsPump : BackgroundService
                     wifi = new
                     {
                         state = safetyState.ToString(),
+                        connected = connected,
                         rssiDbm = rssi,
                         bssid = bssid,
                         ssid = ssid,
@@ -1180,7 +1480,19 @@ sealed class DiagnosticsPump : BackgroundService
                         txBitrateMbps = txMbps,
                         rxBitrateMbps = rxMbps,
                         lastRoamAt = lastRoam != DateTime.MinValue ? lastRoam.ToString("o") : null,
-                        signalPercent = wifiSignalPercent
+                        signalPercent = wifiSignalPercent,
+                        nearbyAps = nearbyAps.Select(ap => new { 
+                            bssid = ap.Bssid, 
+                            ssid = ap.Ssid,
+                            // Use live RSSI for current AP, scan cache for others
+                            rssiDbm = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase) ? rssi : ap.RssiDbm,
+                            isCurrent = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase)
+                        }),
+                        betterApAvailable = betterApAvailable != null ? new {
+                            bssid = betterApAvailable.Bssid,
+                            rssiDbm = betterApAvailable.RssiDbm,
+                            improvement = betterApAvailable.RssiDbm - rssi
+                        } : null
                     },
                     motors = new
                     {

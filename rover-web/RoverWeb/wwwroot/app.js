@@ -1,4 +1,4 @@
-const CLIENT_VERSION = "1.1.0"; // Bumped for Wi-Fi safety features
+const CLIENT_VERSION = "1.2.0"; // Added nearby APs display
 
 const statusEl = document.getElementById("status");
 const leftValueEl = document.getElementById("leftValue");
@@ -14,11 +14,21 @@ const wifiBitrateEl = document.getElementById("wifiBitrate");
 
 // Wi-Fi state elements
 const wifiStateBanner = document.getElementById("wifiStateBanner");
+const wifiStateHeader = document.getElementById("wifiStateHeader");
 const wifiStateIcon = document.getElementById("wifiStateIcon");
 const wifiStateLabel = document.getElementById("wifiStateLabel");
 const wifiStateDetail = document.getElementById("wifiStateDetail");
+const wifiApCount = document.getElementById("wifiApCount");
 const motorInhibitedOverlay = document.getElementById("motorInhibitedOverlay");
 const motorInhibitedText = document.getElementById("motorInhibitedText");
+const nearbyApsList = document.getElementById("nearbyApsList");
+
+// Wi-Fi banner expand/collapse
+if (wifiStateHeader) {
+  wifiStateHeader.addEventListener('click', () => {
+    wifiStateBanner?.classList.toggle('expanded');
+  });
+}
 
 // Wi-Fi safety state tracking
 let wifiState = "OFFLINE";
@@ -93,6 +103,12 @@ function checkConnection() {
 function handleTelemetry(telem) {
   // Update Wi-Fi state
   if (telem.wifi) {
+    // Debug: log if state is OFFLINE but we have valid data
+    if (telem.wifi.state === "OFFLINE" && telem.wifi.bssid) {
+      console.warn("State OFFLINE but have BSSID:", telem.wifi.bssid, "connected:", telem.wifi.connected);
+    }
+    
+    // Use actual state, or override to OK if we clearly have a connection
     wifiState = telem.wifi.state || "OFFLINE";
     
     // Update RSSI display
@@ -121,6 +137,11 @@ function handleTelemetry(telem) {
     
     // Update Wi-Fi state banner
     updateWifiStateBanner(wifiState, telem.wifi.rssiDbm, telem.wifi.bssid);
+    
+    // Update nearby APs list
+    if (telem.wifi.nearbyAps) {
+      updateNearbyApsList(telem.wifi.nearbyAps, telem.wifi.betterApAvailable);
+    }
   }
   
   // Update motor inhibition state
@@ -207,6 +228,69 @@ function updateWifiStateBanner(state, rssi, bssid) {
       }
       break;
   }
+}
+
+// Update nearby APs list
+function updateNearbyApsList(nearbyAps, betterAp) {
+  // Update AP count badge
+  if (wifiApCount) {
+    const count = nearbyAps?.length || 0;
+    wifiApCount.textContent = `${count} AP${count !== 1 ? 's' : ''}`;
+    
+    // Highlight if better AP available
+    if (betterAp) {
+      wifiApCount.style.background = 'rgba(63, 185, 80, 0.3)';
+      wifiApCount.style.color = '#3fb950';
+    } else {
+      wifiApCount.style.background = 'rgba(0,0,0,0.2)';
+      wifiApCount.style.color = '#6e7681';
+    }
+  }
+  
+  if (!nearbyApsList) return;
+  
+  if (!nearbyAps || nearbyAps.length === 0) {
+    nearbyApsList.innerHTML = '<div class="nearby-ap-item">No APs found</div>';
+    return;
+  }
+  
+  let html = '';
+  
+  for (const ap of nearbyAps) {
+    const isCurrent = ap.isCurrent;
+    const isBetter = betterAp && ap.bssid === betterAp.bssid;
+    
+    // Determine RSSI class
+    let rssiClass = 'bad';
+    if (ap.rssiDbm >= -50) rssiClass = 'good';
+    else if (ap.rssiDbm >= -70) rssiClass = 'medium';
+    
+    // Build item classes
+    let itemClass = 'nearby-ap-item';
+    if (isCurrent) itemClass += ' current';
+    else if (isBetter) itemClass += ' better';
+    
+    // Format BSSID (show last 8 chars)
+    const shortBssid = ap.bssid.slice(-8);
+    
+    // Build indicator
+    let indicator = '';
+    if (isCurrent) {
+      indicator = '<span class="ap-indicator current">Current</span>';
+    } else if (isBetter) {
+      indicator = `<span class="ap-indicator better">+${betterAp.improvement}dB</span>`;
+    }
+    
+    html += `
+      <div class="${itemClass}">
+        <span class="ap-bssid">${shortBssid}</span>
+        <span class="ap-rssi ${rssiClass}">${ap.rssiDbm} dBm</span>
+        ${indicator}
+      </div>
+    `;
+  }
+  
+  nearbyApsList.innerHTML = html;
 }
 
 // Update motor inhibition display
@@ -351,6 +435,10 @@ function connect() {
           pendingRequestFrom = null;
         }
         updateRoleUI();
+      } else if (msg.startsWith("RESCAN:")) {
+        // Handle rescan response
+        const result = msg.substring(7);
+        handleRescanResult(result);
       } else if (msg === "GRANTED") {
         // Our request was accepted
         requestPending = false;
@@ -611,6 +699,40 @@ window.addEventListener("pointerup", (e) => {
 // Initialize
 connect();
 tick();
+
+// Mobile layout: move diagnostics into video container for overlay effect
+function setupMobileLayout() {
+  const isMobile = window.innerWidth <= 768;
+  const diagnosticsSection = document.querySelector('.diagnostics-section');
+  const videoContainer = document.querySelector('.video-container');
+  const mainGrid = document.querySelector('.main-grid');
+  
+  if (!diagnosticsSection || !videoContainer || !mainGrid) return;
+  
+  if (isMobile) {
+    // Move diagnostics into video container for overlay
+    if (diagnosticsSection.parentElement !== videoContainer) {
+      videoContainer.appendChild(diagnosticsSection);
+      diagnosticsSection.classList.add('mobile-overlay');
+    }
+  } else {
+    // Move back to main grid for desktop
+    if (diagnosticsSection.parentElement === videoContainer) {
+      // Find camera section and insert after it
+      const cameraSection = document.querySelector('.camera-section');
+      if (cameraSection && cameraSection.nextSibling) {
+        mainGrid.insertBefore(diagnosticsSection, cameraSection.nextSibling);
+      } else {
+        mainGrid.appendChild(diagnosticsSection);
+      }
+      diagnosticsSection.classList.remove('mobile-overlay');
+    }
+  }
+}
+
+// Run on load and resize
+setupMobileLayout();
+window.addEventListener('resize', setupMobileLayout);
 
 // Mobile splitter functionality
 const mobileSplitter = document.getElementById('mobileSplitter');
@@ -884,7 +1006,6 @@ setupKnob(
 
 // Headlight control
 const headlightBtn = document.getElementById('headlightBtn');
-const headlightIcon = headlightBtn?.querySelector('.control-icon');
 
 function toggleHeadlight(e) {
   if (!isOperator) return;
@@ -893,17 +1014,9 @@ function toggleHeadlight(e) {
   
   headlightOn = !headlightOn;
   if (headlightOn) {
-    headlightBtn.classList.add('active');
-    if (headlightIcon) {
-      headlightIcon.classList.remove('fa-lightbulb');
-      headlightIcon.classList.add('fa-lightbulb-on');
-    }
+    headlightBtn?.classList.add('active');
   } else {
-    headlightBtn.classList.remove('active');
-    if (headlightIcon) {
-      headlightIcon.classList.remove('fa-lightbulb-on');
-      headlightIcon.classList.add('fa-lightbulb');
-    }
+    headlightBtn?.classList.remove('active');
   }
   send(`H ${headlightOn ? 1 : 0}`);
 }
@@ -912,6 +1025,69 @@ if (headlightBtn) {
   // Handle both click and touch events
   headlightBtn.addEventListener('click', toggleHeadlight);
   headlightBtn.addEventListener('touchend', toggleHeadlight, { passive: false });
+}
+
+// Rescan button
+const rescanBtn = document.getElementById('rescanBtn');
+
+function triggerRescan(e) {
+  if (!isOperator) return;
+  e.preventDefault();
+  e.stopPropagation();
+  
+  if (rescanBtn?.classList.contains('scanning')) return;
+  
+  rescanBtn?.classList.add('scanning');
+  const spanEl = rescanBtn?.querySelector('span');
+  if (spanEl) spanEl.textContent = 'Scanning...';
+  
+  send('RESCAN');
+}
+
+function handleRescanResult(result) {
+  const spanEl = rescanBtn?.querySelector('span');
+  rescanBtn?.classList.remove('scanning');
+  
+  if (result === 'started') {
+    // Still in progress
+    rescanBtn?.classList.add('scanning');
+    if (spanEl) spanEl.textContent = 'Scanning...';
+    return;
+  }
+  
+  // Parse result and show feedback
+  if (result.startsWith('roamed:')) {
+    const parts = result.split(':');
+    const bssid = parts[1]?.slice(-8) || '';
+    const rssi = parts[2] || '';
+    if (spanEl) spanEl.textContent = `Roamed to ${bssid}`;
+    setTimeout(() => {
+      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+    }, 3000);
+  } else if (result.startsWith('already_best:')) {
+    if (spanEl) spanEl.textContent = 'Already on best AP';
+    setTimeout(() => {
+      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+    }, 2000);
+  } else if (result.startsWith('no_better_ap:')) {
+    if (spanEl) spanEl.textContent = 'No better AP found';
+    setTimeout(() => {
+      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+    }, 2000);
+  } else if (result === 'no_aps_found') {
+    if (spanEl) spanEl.textContent = 'No APs found';
+    setTimeout(() => {
+      if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+    }, 2000);
+  } else {
+    console.log('Rescan result:', result);
+    if (spanEl) spanEl.textContent = 'Rescan & Connect Best';
+  }
+}
+
+if (rescanBtn) {
+  rescanBtn.addEventListener('click', triggerRescan);
+  rescanBtn.addEventListener('touchend', triggerRescan, { passive: false });
 }
 
 // Operator/Spectator role management
@@ -993,6 +1169,7 @@ function updateRoleUI() {
     joystick?.classList.remove('disabled');
     joystickHandle?.classList.remove('disabled');
     allKnobs.forEach(knob => knob.classList.remove('disabled'));
+    rescanBtn?.classList.remove('disabled');
     
     // Update motor inhibit overlay
     updateMotorInhibitDisplay();
@@ -1038,6 +1215,7 @@ function updateRoleUI() {
     joystick?.classList.add('disabled');
     joystickHandle?.classList.add('disabled');
     allKnobs.forEach(knob => knob.classList.add('disabled'));
+    rescanBtn?.classList.add('disabled');
     
     // Force reset all interaction states
     isDragging = false;
