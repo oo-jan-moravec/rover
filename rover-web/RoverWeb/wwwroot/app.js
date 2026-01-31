@@ -1,4 +1,4 @@
-const CLIENT_VERSION = "1.3.0"; // Added cloud relay support
+const CLIENT_VERSION = "1.4.0"; // Unified local/cloud operator control
 
 // ===== Cloud Mode Detection =====
 // Cloud mode is enabled via URL parameters: ?cloud=1&relay=https://relay.example.com&key=access-key
@@ -1041,7 +1041,10 @@ const disconnectStatus = document.getElementById('disconnectStatus');
 
 // Set camera feed source dynamically
 if (cameraFeed) {
-  cameraFeed.src = `http://${location.hostname}:8889/cam`;
+  // Use relative path for video to support tunnels/proxies
+  cameraFeed.src = location.hostname.includes('.') 
+    ? "/cam/" 
+    : `http://${location.hostname}:8889/cam/`;
 }
 
 let isSplitterDragging = false;

@@ -8,7 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.SignalR.Client;
 
-const string CLIENT_VERSION = "1.3.0"; // Added cloud relay support
+const string CLIENT_VERSION = "1.4.0"; // Unified local/cloud operator control
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
@@ -572,9 +572,90 @@ sealed class OperatorManager
     private Guid? _pendingRequestId;
     private readonly ILogger<OperatorManager>? _logger;
 
+    // Cloud operator tracking - uses a fixed synthetic GUID
+    private static readonly Guid CloudOperatorGuid = new("00000000-0000-0000-0000-C10UD0PERAT0");
+    private bool _cloudOperatorActive = false;
+    private string _cloudOperatorName = "";
+
+    // Event for notifying when operator changes (for cloud sync)
+    public event Action<string?, bool>? OnOperatorChanged; // (operatorName, isCloudOperator)
+
     public OperatorManager(ILogger<OperatorManager>? logger = null)
     {
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Check if a cloud operator is currently active
+    /// </summary>
+    public bool IsCloudOperator()
+    {
+        lock (_lock) return _cloudOperatorActive;
+    }
+
+    /// <summary>
+    /// Set cloud operator state (called by CloudConnector)
+    /// </summary>
+    public bool SetCloudOperator(string? name)
+    {
+        lock (_lock)
+        {
+            if (name != null)
+            {
+                // Cloud operator wants to take control
+                if (_currentOperatorId.HasValue && _currentOperatorId != CloudOperatorGuid)
+                {
+                    // Local operator already exists - deny cloud operator
+                    _logger?.LogWarning($"Cloud operator '{name}' denied - local operator exists");
+                    return false;
+                }
+
+                _cloudOperatorActive = true;
+                _cloudOperatorName = name;
+                _currentOperatorId = CloudOperatorGuid;
+                _clientNames[CloudOperatorGuid] = $"Cloud:{name}";
+                _logger?.LogInformation($"Cloud operator set: {name}");
+                OnOperatorChanged?.Invoke($"Cloud:{name}", true);
+                return true;
+            }
+            else
+            {
+                // Cloud operator released
+                if (_cloudOperatorActive)
+                {
+                    _cloudOperatorActive = false;
+                    _cloudOperatorName = "";
+                    if (_currentOperatorId == CloudOperatorGuid)
+                    {
+                        _currentOperatorId = null;
+                    }
+                    _clientNames.TryRemove(CloudOperatorGuid, out _);
+                    _logger?.LogInformation("Cloud operator released");
+                    OnOperatorChanged?.Invoke(null, true);
+                }
+                return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Check if there is any operator (local or cloud)
+    /// </summary>
+    public bool HasOperator()
+    {
+        lock (_lock) return _currentOperatorId.HasValue;
+    }
+
+    /// <summary>
+    /// Check if cloud client can send motor commands
+    /// </summary>
+    public bool CanCloudOperate()
+    {
+        lock (_lock)
+        {
+            // Cloud can operate only if cloud is the current operator
+            return _cloudOperatorActive && _currentOperatorId == CloudOperatorGuid;
+        }
     }
 
     public string RegisterClient(Guid clientId)
@@ -595,6 +676,8 @@ sealed class OperatorManager
             {
                 _logger?.LogInformation($"Operator {clientId} disconnected, clearing operator");
                 _currentOperatorId = null;
+                _cloudOperatorActive = false;
+                OnOperatorChanged?.Invoke(null, false);
             }
             if (_pendingRequestId == clientId)
             {
@@ -636,7 +719,10 @@ sealed class OperatorManager
             if (_currentOperatorId == null)
             {
                 _currentOperatorId = clientId;
+                _cloudOperatorActive = false; // Local takes precedence
+                var name = GetClientName(clientId);
                 _logger?.LogInformation($"Client {clientId} claimed operator role");
+                OnOperatorChanged?.Invoke(name, false);
                 return true;
             }
             return false;
@@ -653,13 +739,28 @@ sealed class OperatorManager
             {
                 // No operator, auto-grant
                 _currentOperatorId = clientId;
+                _cloudOperatorActive = false;
+                var name = GetClientName(clientId);
                 _logger?.LogInformation($"No operator, auto-granting to {clientId}");
+                OnOperatorChanged?.Invoke(name, false);
                 return true;
             }
 
             if (_currentOperatorId == clientId)
             {
                 // Already operator
+                return true;
+            }
+
+            // If cloud is operator, local can request (and will get it via accept flow or force take)
+            if (_currentOperatorId == CloudOperatorGuid)
+            {
+                // Auto-grant to local over cloud
+                _currentOperatorId = clientId;
+                _cloudOperatorActive = false;
+                var name = GetClientName(clientId);
+                _logger?.LogInformation($"Local client {clientId} took control from cloud operator");
+                OnOperatorChanged?.Invoke(name, false);
                 return true;
             }
 
@@ -695,9 +796,12 @@ sealed class OperatorManager
             var oldOperator = _currentOperatorId;
             var newOperator = _pendingRequestId.Value;
             _currentOperatorId = newOperator;
+            _cloudOperatorActive = false;
             _pendingRequestId = null;
 
+            var name = GetClientName(newOperator);
             _logger?.LogInformation($"Control transferred from {oldOperator} to {newOperator}");
+            OnOperatorChanged?.Invoke(name, false);
             return (true, newOperator, oldOperator);
         }
     }
@@ -738,7 +842,9 @@ sealed class OperatorManager
 
             _logger?.LogInformation($"Operator {operatorId} released control");
             _currentOperatorId = null;
+            _cloudOperatorActive = false;
             _pendingRequestId = null; // Clear any pending request
+            OnOperatorChanged?.Invoke(null, false);
             return true;
         }
     }
@@ -1614,12 +1720,12 @@ sealed class CloudConnector : BackgroundService
     private readonly SafetyStateMachine _safetyMachine;
     private readonly WifiState _wifiState;
     private readonly WifiMonitor _wifiMonitor;
+    private readonly OperatorManager _operatorManager;
     private readonly IConfiguration _config;
     private readonly ILogger<CloudConnector> _logger;
 
     private HubConnection? _hubConnection;
     private bool _isConnected;
-    private string? _currentOperatorName;
 
     public CloudConnector(
         RoverState roverState,
@@ -1627,6 +1733,7 @@ sealed class CloudConnector : BackgroundService
         SafetyStateMachine safetyMachine,
         WifiState wifiState,
         WifiMonitor wifiMonitor,
+        OperatorManager operatorManager,
         IConfiguration config,
         ILogger<CloudConnector> logger)
     {
@@ -1635,8 +1742,39 @@ sealed class CloudConnector : BackgroundService
         _safetyMachine = safetyMachine;
         _wifiState = wifiState;
         _wifiMonitor = wifiMonitor;
+        _operatorManager = operatorManager;
         _config = config;
         _logger = logger;
+
+        // Subscribe to operator changes to notify cloud relay
+        _operatorManager.OnOperatorChanged += OnLocalOperatorChanged;
+    }
+
+    private async void OnLocalOperatorChanged(string? operatorName, bool isCloudOperator)
+    {
+        // Only notify cloud if it's a local operator change (not cloud operator)
+        if (!isCloudOperator && _hubConnection?.State == HubConnectionState.Connected)
+        {
+            try
+            {
+                if (operatorName != null)
+                {
+                    // Local operator took control - notify cloud to release/block cloud operators
+                    await _hubConnection.InvokeAsync("LocalOperatorTookControl", operatorName);
+                    _logger.LogInformation("Notified cloud: local operator '{Name}' took control", operatorName);
+                }
+                else
+                {
+                    // Local operator released - notify cloud that rover is available
+                    await _hubConnection.InvokeAsync("LocalOperatorReleased");
+                    _logger.LogInformation("Notified cloud: local operator released");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to notify cloud of operator change");
+            }
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1847,6 +1985,12 @@ sealed class CloudConnector : BackgroundService
     // Command handlers
     private void OnMotorCommand(MotorCommandData data)
     {
+        // Check if cloud operator is allowed to control
+        if (!_operatorManager.CanCloudOperate())
+        {
+            _logger.LogDebug("Cloud motor command ignored - not the operator");
+            return;
+        }
         if (_safetyMachine.AreMotorsInhibited()) return;
         _roverState.Touch();
         _roverState.Set(Clamp(data.Left), Clamp(data.Right));
@@ -1854,16 +1998,38 @@ sealed class CloudConnector : BackgroundService
 
     private void OnStop()
     {
+        // Stop is always allowed (safety)
         _roverState.Set(0, 0);
     }
 
     private void OnHeadlight(HeadlightData data)
     {
+        // Headlight requires operator status
+        if (!_operatorManager.CanCloudOperate())
+        {
+            _logger.LogDebug("Cloud headlight command ignored - not the operator");
+            return;
+        }
         _gpio.SetHeadlight(data.On);
     }
 
     private async void OnRescan(RescanData data)
     {
+        // Rescan requires operator status
+        if (!_operatorManager.CanCloudOperate())
+        {
+            _logger.LogDebug("Cloud rescan command ignored - not the operator");
+            if (_hubConnection?.State == HubConnectionState.Connected)
+            {
+                try
+                {
+                    await _hubConnection.InvokeAsync("SendToClient", data.ClientConnectionId, "RescanResult", new { result = "denied:not_operator" });
+                }
+                catch { }
+            }
+            return;
+        }
+
         try
         {
             if (_hubConnection?.State == HubConnectionState.Connected)
@@ -1896,20 +2062,45 @@ sealed class CloudConnector : BackgroundService
 
     private void OnOperatorChanged(OperatorChangedData data)
     {
-        _currentOperatorName = data.Name;
-        _logger.LogInformation("Cloud operator changed: {Name}", data.Name);
+        var success = _operatorManager.SetCloudOperator(data.Name);
+        if (success)
+        {
+            _logger.LogInformation("Cloud operator set: {Name}", data.Name);
+        }
+        else
+        {
+            _logger.LogWarning("Cloud operator '{Name}' blocked - local operator active", data.Name);
+            // Notify cloud that this operator was rejected
+            NotifyCloudOperatorRejected(data.Name);
+        }
+    }
+
+    private async void NotifyCloudOperatorRejected(string cloudOperatorName)
+    {
+        if (_hubConnection?.State == HubConnectionState.Connected)
+        {
+            try
+            {
+                var localOpName = _operatorManager.GetCurrentOperatorName();
+                await _hubConnection.InvokeAsync("OperatorRejected", cloudOperatorName, localOpName ?? "local pilot");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to notify cloud of operator rejection");
+            }
+        }
     }
 
     private void OnOperatorReleased()
     {
-        _currentOperatorName = null;
+        _operatorManager.SetCloudOperator(null);
         _roverState.Set(0, 0);
         _logger.LogInformation("Cloud operator released");
     }
 
     private void OnOperatorDisconnected()
     {
-        _currentOperatorName = null;
+        _operatorManager.SetCloudOperator(null);
         _roverState.Set(0, 0);
         _logger.LogInformation("Cloud operator disconnected");
     }
@@ -2022,6 +2213,7 @@ sealed class CloudConnector : BackgroundService
 
     public override void Dispose()
     {
+        _operatorManager.OnOperatorChanged -= OnLocalOperatorChanged;
         _hubConnection?.DisposeAsync().AsTask().Wait();
         base.Dispose();
     }
