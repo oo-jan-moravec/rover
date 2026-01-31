@@ -93,6 +93,7 @@ let spinZonePercent = parseFloat(localStorage.getItem('spinZone') || '15');
 let forwardTrim = parseInt(localStorage.getItem('forwardTrim') || '0');
 let reverseTrim = parseInt(localStorage.getItem('reverseTrim') || '0');
 let headlightOn = false;
+let irLedOn = false;
 
 // Operator/Spectator state (server-managed)
 let isOperator = false;
@@ -747,6 +748,9 @@ function send(msg) {
     } else if (msg.startsWith("H ")) {
       const on = msg.split(' ')[1] === '1';
       hubConnection.invoke("SendHeadlight", on);
+    } else if (msg.startsWith("I ")) {
+      const on = msg.split(' ')[1] === '1';
+      hubConnection.invoke("SendIrLed", on);
     } else if (msg === "RESCAN") {
       hubConnection.invoke("SendRescan");
     } else if (msg === "CLAIM") {
@@ -1306,8 +1310,9 @@ setupKnob(
   }
 );
 
-// Headlight control
+// Light controls
 const headlightBtn = document.getElementById('headlightBtn');
+const irLedBtn = document.getElementById('irLedBtn');
 
 function toggleHeadlight(e) {
   if (!isOperator) return;
@@ -1323,10 +1328,28 @@ function toggleHeadlight(e) {
   send(`H ${headlightOn ? 1 : 0}`);
 }
 
+function toggleIrLed(e) {
+  if (!isOperator) return;
+  e.preventDefault();
+  e.stopPropagation();
+  
+  irLedOn = !irLedOn;
+  if (irLedOn) {
+    irLedBtn?.classList.add('active');
+  } else {
+    irLedBtn?.classList.remove('active');
+  }
+  send(`I ${irLedOn ? 1 : 0}`);
+}
+
 if (headlightBtn) {
-  // Handle both click and touch events
   headlightBtn.addEventListener('click', toggleHeadlight);
   headlightBtn.addEventListener('touchend', toggleHeadlight, { passive: false });
+}
+
+if (irLedBtn) {
+  irLedBtn.addEventListener('click', toggleIrLed);
+  irLedBtn.addEventListener('touchend', toggleIrLed, { passive: false });
 }
 
 // Rescan button
@@ -1533,6 +1556,7 @@ function updateRoleUI() {
     
     // Enable controls (unless motors are inhibited)
     headlightBtn?.classList.remove('disabled');
+    irLedBtn?.classList.remove('disabled');
     joystick?.classList.remove('disabled');
     joystickHandle?.classList.remove('disabled');
     allKnobs.forEach(knob => knob.classList.remove('disabled'));
@@ -1579,6 +1603,7 @@ function updateRoleUI() {
     
     // Disable controls
     headlightBtn?.classList.add('disabled');
+    irLedBtn?.classList.add('disabled');
     joystick?.classList.add('disabled');
     joystickHandle?.classList.add('disabled');
     allKnobs.forEach(knob => knob.classList.add('disabled'));

@@ -373,39 +373,62 @@
         cursor: grabbing;
         transform: scale(1.05);
       }
-      /* Headlight button - circular, absolute positioned */
-      .headlight-btn {
+      /* Light buttons - circular, absolute positioned in corner */
+      .light-controls {
         position: absolute;
         top: 12px;
         right: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 10;
+      }
+      .light-btn {
         width: 44px;
         height: 44px;
         border-radius: 50%;
         background: #21262d;
         border: 2px solid #30363d;
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
-        font-size: 18px;
         color: #8b949e;
         cursor: pointer;
         transition: all 0.2s;
-        z-index: 10;
+        position: relative;
       }
-      .headlight-btn:hover {
+      .light-btn:hover {
         background: #30363d;
         border-color: #444c56;
       }
-      .headlight-btn:active {
+      .light-btn:active {
         transform: scale(0.95);
       }
-      .headlight-btn.active {
+      .light-btn.active {
         background: #1a3a1a;
         border-color: #3fb950;
         color: #3fb950;
         box-shadow: 0 0 12px rgba(63, 185, 80, 0.4);
       }
-      .headlight-btn.disabled {
+      .light-btn.ir.active {
+        background: rgba(248, 81, 73, 0.1);
+        border-color: #f85149;
+        color: #f85149;
+        box-shadow: 0 0 12px rgba(248, 81, 73, 0.4);
+      }
+      .light-btn i {
+        font-size: 18px;
+      }
+      .light-btn-label {
+        font-size: 8px;
+        font-weight: 700;
+        text-transform: uppercase;
+        margin-top: -2px;
+        position: absolute;
+        bottom: 4px;
+      }
+      .light-btn.disabled {
         opacity: 0.4;
         cursor: not-allowed;
         pointer-events: none;
@@ -1061,12 +1084,21 @@
           order: 2;
           padding: 12px;
         }
-        .headlight-btn {
-          width: 40px;
-          height: 40px;
-          font-size: 16px;
+        .light-controls {
           top: 8px;
           right: 8px;
+          gap: 8px;
+        }
+        .light-btn {
+          width: 36px;
+          height: 36px;
+        }
+        .light-btn i {
+          font-size: 14px;
+        }
+        .light-btn-label {
+          font-size: 7px;
+          bottom: 2px;
         }
         .joystick {
           width: 200px;
@@ -1360,12 +1392,24 @@
       </div>
 
       <div class="controls-section joystick-section">
-        <!-- Headlight button - absolute positioned in corner -->
-        <div
-          class="headlight-btn"
-          id="headlightBtn"
-        >
-          <i class="fa-light fa-lightbulb"></i>
+        <!-- Light controls -->
+        <div class="light-controls">
+          <div
+            class="light-btn"
+            id="headlightBtn"
+            title="Toggle Normal LED"
+          >
+            <i class="fa-light fa-lightbulb"></i>
+            <span class="light-btn-label">LED</span>
+          </div>
+          <div
+            class="light-btn ir"
+            id="irLedBtn"
+            title="Toggle IR LED"
+          >
+            <i class="fa-light fa-eye"></i>
+            <span class="light-btn-label">IR</span>
+          </div>
         </div>
 
         <div

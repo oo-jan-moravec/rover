@@ -208,6 +208,14 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                         gpio.SetHeadlight(state_val == 1);
                     }
                 }
+                else if (msg.StartsWith("I "))
+                {
+                    var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 2 && int.TryParse(parts[1], out var state_val))
+                    {
+                        gpio.SetIrLed(state_val == 1);
+                    }
+                }
                 else if (msg == "RESCAN")
                 {
                     // Trigger Wi-Fi rescan and connect to best AP
@@ -981,10 +989,12 @@ sealed class SerialPump : BackgroundService
 
 sealed class GpioController : IDisposable
 {
-    private const int HeadlightPin = 4;
+    private const int IrLedPin = 4;
+    private const int HeadlightPin = 27;
     private System.Device.Gpio.GpioController? _controller;
     private bool _gpioAvailable = false;
-    private bool _headlightState = false;
+    private bool _headlightOn = false;
+    private bool _irLedOn = false;
     private readonly ILogger<GpioController>? _logger;
 
     public GpioController(ILogger<GpioController>? logger = null)
@@ -994,14 +1004,19 @@ sealed class GpioController : IDisposable
         try
         {
             _controller = new System.Device.Gpio.GpioController();
+            
+            _controller.OpenPin(IrLedPin, PinMode.Output);
+            _controller.Write(IrLedPin, PinValue.Low);
+            
             _controller.OpenPin(HeadlightPin, PinMode.Output);
             _controller.Write(HeadlightPin, PinValue.Low);
+            
             _gpioAvailable = true;
-            _logger?.LogInformation($"GPIO initialized successfully. Pin {HeadlightPin} set to output.");
+            _logger?.LogInformation($"GPIO initialized successfully. IR (Pin {IrLedPin}) and Headlight (Pin {HeadlightPin}) set to output.");
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "GPIO not available, headlight control disabled");
+            _logger?.LogWarning(ex, "GPIO not available, light control disabled");
             _gpioAvailable = false;
             _controller?.Dispose();
             _controller = null;
@@ -1010,7 +1025,7 @@ sealed class GpioController : IDisposable
 
     public void SetHeadlight(bool on)
     {
-        _headlightState = on;
+        _headlightOn = on;
 
         if (!_gpioAvailable || _controller == null)
         {
@@ -1026,11 +1041,34 @@ sealed class GpioController : IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to set GPIO");
+            _logger?.LogError(ex, "Failed to set Headlight GPIO");
         }
     }
 
-    public bool GetHeadlightState() => _headlightState;
+    public void SetIrLed(bool on)
+    {
+        _irLedOn = on;
+
+        if (!_gpioAvailable || _controller == null)
+        {
+            _logger?.LogWarning("GPIO not available, cannot set IR LED");
+            return;
+        }
+
+        try
+        {
+            var pinValue = on ? PinValue.High : PinValue.Low;
+            _controller.Write(IrLedPin, pinValue);
+            _logger?.LogInformation($"IR LED turned {(on ? "ON" : "OFF")} (GPIO {IrLedPin} = {(on ? "HIGH" : "LOW")})");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to set IR LED GPIO");
+        }
+    }
+
+    public bool GetHeadlightState() => _headlightOn;
+    public bool GetIrLedState() => _irLedOn;
 
     public void Dispose()
     {
@@ -1038,8 +1076,10 @@ sealed class GpioController : IDisposable
         {
             try
             {
-                // Turn off headlight
+                // Turn off lights
+                _controller.Write(IrLedPin, PinValue.Low);
                 _controller.Write(HeadlightPin, PinValue.Low);
+                _controller.ClosePin(IrLedPin);
                 _controller.ClosePin(HeadlightPin);
             }
             catch { }
@@ -1828,6 +1868,7 @@ sealed class CloudConnector : BackgroundService
         _hubConnection.On<MotorCommandData>("MotorCommand", OnMotorCommand);
         _hubConnection.On("Stop", OnStop);
         _hubConnection.On<HeadlightData>("Headlight", OnHeadlight);
+        _hubConnection.On<IrLedData>("IrLed", OnIrLed);
         _hubConnection.On<RescanData>("Rescan", OnRescan);
         _hubConnection.On<ClientJoinedData>("ClientJoined", OnClientJoined);
         _hubConnection.On<ClientLeftData>("ClientLeft", OnClientLeft);
@@ -2011,6 +2052,17 @@ sealed class CloudConnector : BackgroundService
             return;
         }
         _gpio.SetHeadlight(data.On);
+    }
+
+    private void OnIrLed(IrLedData data)
+    {
+        // IR LED requires operator status
+        if (!_operatorManager.CanCloudOperate())
+        {
+            _logger.LogDebug("Cloud IR LED command ignored - not the operator");
+            return;
+        }
+        _gpio.SetIrLed(data.On);
     }
 
     private async void OnRescan(RescanData data)
@@ -2222,6 +2274,7 @@ sealed class CloudConnector : BackgroundService
 // DTOs for SignalR messages
 record MotorCommandData(int Left, int Right);
 record HeadlightData(bool On);
+record IrLedData(bool On);
 record RescanData(string ClientConnectionId);
 record ClientJoinedData(string ConnectionId, string Name);
 record ClientLeftData(string ConnectionId);

@@ -705,6 +705,20 @@ public class ClientHub : Hub
     }
 
     /// <summary>
+    /// Client sends IR LED command
+    /// </summary>
+    public async Task SendIrLed(bool on)
+    {
+        if (!_manager.IsOperator(Context.ConnectionId)) return;
+
+        if (_manager.RoverConnectionId != null)
+        {
+            await _roverHub.Clients.Client(_manager.RoverConnectionId)
+                .SendAsync("IrLed", new { on });
+        }
+    }
+
+    /// <summary>
     /// Client sends rescan command
     /// </summary>
     public async Task SendRescan()
