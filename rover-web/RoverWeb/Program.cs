@@ -6,9 +6,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.AspNetCore.SignalR.Client;
-
-const string CLIENT_VERSION = "1.4.0"; // Unified local/cloud operator control
+const string CLIENT_VERSION = "1.5.0"; // Local operator control only
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
@@ -21,8 +19,6 @@ builder.Services.AddSingleton<WifiMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WifiMonitor>());
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
-builder.Services.AddHostedService<CloudConnector>();
-
 var app = builder.Build();
 
 app.UseDefaultFiles();
@@ -580,90 +576,17 @@ sealed class OperatorManager
     private Guid? _pendingRequestId;
     private readonly ILogger<OperatorManager>? _logger;
 
-    // Cloud operator tracking - uses a fixed synthetic GUID
-    private static readonly Guid CloudOperatorGuid = new("00000000-0000-0000-0000-C10UD0PERAT0");
-    private bool _cloudOperatorActive = false;
-    private string _cloudOperatorName = "";
-
-    // Event for notifying when operator changes (for cloud sync)
-    public event Action<string?, bool>? OnOperatorChanged; // (operatorName, isCloudOperator)
-
     public OperatorManager(ILogger<OperatorManager>? logger = null)
     {
         _logger = logger;
     }
 
     /// <summary>
-    /// Check if a cloud operator is currently active
-    /// </summary>
-    public bool IsCloudOperator()
-    {
-        lock (_lock) return _cloudOperatorActive;
-    }
-
-    /// <summary>
-    /// Set cloud operator state (called by CloudConnector)
-    /// </summary>
-    public bool SetCloudOperator(string? name)
-    {
-        lock (_lock)
-        {
-            if (name != null)
-            {
-                // Cloud operator wants to take control
-                if (_currentOperatorId.HasValue && _currentOperatorId != CloudOperatorGuid)
-                {
-                    // Local operator already exists - deny cloud operator
-                    _logger?.LogWarning($"Cloud operator '{name}' denied - local operator exists");
-                    return false;
-                }
-
-                _cloudOperatorActive = true;
-                _cloudOperatorName = name;
-                _currentOperatorId = CloudOperatorGuid;
-                _clientNames[CloudOperatorGuid] = $"Cloud:{name}";
-                _logger?.LogInformation($"Cloud operator set: {name}");
-                OnOperatorChanged?.Invoke($"Cloud:{name}", true);
-                return true;
-            }
-            else
-            {
-                // Cloud operator released
-                if (_cloudOperatorActive)
-                {
-                    _cloudOperatorActive = false;
-                    _cloudOperatorName = "";
-                    if (_currentOperatorId == CloudOperatorGuid)
-                    {
-                        _currentOperatorId = null;
-                    }
-                    _clientNames.TryRemove(CloudOperatorGuid, out _);
-                    _logger?.LogInformation("Cloud operator released");
-                    OnOperatorChanged?.Invoke(null, true);
-                }
-                return true;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Check if there is any operator (local or cloud)
+    /// Check if there is any operator
     /// </summary>
     public bool HasOperator()
     {
         lock (_lock) return _currentOperatorId.HasValue;
-    }
-
-    /// <summary>
-    /// Check if cloud client can send motor commands
-    /// </summary>
-    public bool CanCloudOperate()
-    {
-        lock (_lock)
-        {
-            // Cloud can operate only if cloud is the current operator
-            return _cloudOperatorActive && _currentOperatorId == CloudOperatorGuid;
-        }
     }
 
     public string RegisterClient(Guid clientId)
@@ -684,8 +607,6 @@ sealed class OperatorManager
             {
                 _logger?.LogInformation($"Operator {clientId} disconnected, clearing operator");
                 _currentOperatorId = null;
-                _cloudOperatorActive = false;
-                OnOperatorChanged?.Invoke(null, false);
             }
             if (_pendingRequestId == clientId)
             {
@@ -727,10 +648,7 @@ sealed class OperatorManager
             if (_currentOperatorId == null)
             {
                 _currentOperatorId = clientId;
-                _cloudOperatorActive = false; // Local takes precedence
-                var name = GetClientName(clientId);
                 _logger?.LogInformation($"Client {clientId} claimed operator role");
-                OnOperatorChanged?.Invoke(name, false);
                 return true;
             }
             return false;
@@ -747,28 +665,13 @@ sealed class OperatorManager
             {
                 // No operator, auto-grant
                 _currentOperatorId = clientId;
-                _cloudOperatorActive = false;
-                var name = GetClientName(clientId);
                 _logger?.LogInformation($"No operator, auto-granting to {clientId}");
-                OnOperatorChanged?.Invoke(name, false);
                 return true;
             }
 
             if (_currentOperatorId == clientId)
             {
                 // Already operator
-                return true;
-            }
-
-            // If cloud is operator, local can request (and will get it via accept flow or force take)
-            if (_currentOperatorId == CloudOperatorGuid)
-            {
-                // Auto-grant to local over cloud
-                _currentOperatorId = clientId;
-                _cloudOperatorActive = false;
-                var name = GetClientName(clientId);
-                _logger?.LogInformation($"Local client {clientId} took control from cloud operator");
-                OnOperatorChanged?.Invoke(name, false);
                 return true;
             }
 
@@ -804,12 +707,9 @@ sealed class OperatorManager
             var oldOperator = _currentOperatorId;
             var newOperator = _pendingRequestId.Value;
             _currentOperatorId = newOperator;
-            _cloudOperatorActive = false;
             _pendingRequestId = null;
 
-            var name = GetClientName(newOperator);
             _logger?.LogInformation($"Control transferred from {oldOperator} to {newOperator}");
-            OnOperatorChanged?.Invoke(name, false);
             return (true, newOperator, oldOperator);
         }
     }
@@ -850,9 +750,7 @@ sealed class OperatorManager
 
             _logger?.LogInformation($"Operator {operatorId} released control");
             _currentOperatorId = null;
-            _cloudOperatorActive = false;
             _pendingRequestId = null; // Clear any pending request
-            OnOperatorChanged?.Invoke(null, false);
             return true;
         }
     }
@@ -1751,534 +1649,4 @@ sealed class DiagnosticsPump : BackgroundService
     }
 }
 
-// ===== Cloud Relay Connector =====
-
-sealed class CloudConnector : BackgroundService
-{
-    private readonly RoverState _roverState;
-    private readonly GpioController _gpio;
-    private readonly SafetyStateMachine _safetyMachine;
-    private readonly WifiState _wifiState;
-    private readonly WifiMonitor _wifiMonitor;
-    private readonly OperatorManager _operatorManager;
-    private readonly IConfiguration _config;
-    private readonly ILogger<CloudConnector> _logger;
-
-    private HubConnection? _hubConnection;
-    private bool _isConnected;
-
-    public CloudConnector(
-        RoverState roverState,
-        GpioController gpio,
-        SafetyStateMachine safetyMachine,
-        WifiState wifiState,
-        WifiMonitor wifiMonitor,
-        OperatorManager operatorManager,
-        IConfiguration config,
-        ILogger<CloudConnector> logger)
-    {
-        _roverState = roverState;
-        _gpio = gpio;
-        _safetyMachine = safetyMachine;
-        _wifiState = wifiState;
-        _wifiMonitor = wifiMonitor;
-        _operatorManager = operatorManager;
-        _config = config;
-        _logger = logger;
-
-        // Subscribe to operator changes to notify cloud relay
-        _operatorManager.OnOperatorChanged += OnLocalOperatorChanged;
-    }
-
-    private async void OnLocalOperatorChanged(string? operatorName, bool isCloudOperator)
-    {
-        // Only notify cloud if it's a local operator change (not cloud operator)
-        if (!isCloudOperator && _hubConnection?.State == HubConnectionState.Connected)
-        {
-            try
-            {
-                if (operatorName != null)
-                {
-                    // Local operator took control - notify cloud to release/block cloud operators
-                    await _hubConnection.InvokeAsync("LocalOperatorTookControl", operatorName);
-                    _logger.LogInformation("Notified cloud: local operator '{Name}' took control", operatorName);
-                }
-                else
-                {
-                    // Local operator released - notify cloud that rover is available
-                    await _hubConnection.InvokeAsync("LocalOperatorReleased");
-                    _logger.LogInformation("Notified cloud: local operator released");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to notify cloud of operator change");
-            }
-        }
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var enabled = _config.GetValue<bool>("CloudRelay:Enabled");
-        if (!enabled)
-        {
-            _logger.LogInformation("Cloud relay is disabled");
-            return;
-        }
-
-        var url = _config["CloudRelay:Url"];
-        var apiKey = _config["CloudRelay:ApiKey"];
-
-        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(apiKey))
-        {
-            _logger.LogWarning("Cloud relay URL or API key not configured");
-            return;
-        }
-
-        _logger.LogInformation("Cloud relay enabled, connecting to {Url}", url);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                await ConnectAndRunAsync(url, apiKey, stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Cloud relay connection error");
-                _isConnected = false;
-            }
-
-            if (!stoppingToken.IsCancellationRequested)
-            {
-                _logger.LogInformation("Reconnecting to cloud relay in 5 seconds...");
-                await Task.Delay(5000, stoppingToken);
-            }
-        }
-    }
-
-    private async Task ConnectAndRunAsync(string url, string apiKey, CancellationToken stoppingToken)
-    {
-        _hubConnection = new HubConnectionBuilder()
-            .WithUrl($"{url}?apiKey={apiKey}")
-            .WithAutomaticReconnect(new[] { TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10) })
-            .Build();
-
-        // Register handlers for commands from cloud
-        _hubConnection.On<MotorCommandData>("MotorCommand", OnMotorCommand);
-        _hubConnection.On("Stop", OnStop);
-        _hubConnection.On<HeadlightData>("Headlight", OnHeadlight);
-        _hubConnection.On<IrLedData>("IrLed", OnIrLed);
-        _hubConnection.On<RescanData>("Rescan", OnRescan);
-        _hubConnection.On<ClientJoinedData>("ClientJoined", OnClientJoined);
-        _hubConnection.On<ClientLeftData>("ClientLeft", OnClientLeft);
-        _hubConnection.On<OperatorChangedData>("OperatorChanged", OnOperatorChanged);
-        _hubConnection.On("OperatorReleased", OnOperatorReleased);
-        _hubConnection.On("OperatorDisconnected", OnOperatorDisconnected);
-        _hubConnection.On<WebRtcSignalData>("WebRtcSignal", OnWebRtcSignal);
-        _hubConnection.On<WhepRequestData>("WhepRequest", OnWhepRequest);
-
-        _hubConnection.Reconnecting += error =>
-        {
-            _logger.LogWarning("Cloud relay reconnecting: {Error}", error?.Message);
-            _isConnected = false;
-            return Task.CompletedTask;
-        };
-
-        _hubConnection.Reconnected += connectionId =>
-        {
-            _logger.LogInformation("Cloud relay reconnected: {ConnectionId}", connectionId);
-            _isConnected = true;
-            return Task.CompletedTask;
-        };
-
-        _hubConnection.Closed += error =>
-        {
-            _logger.LogWarning("Cloud relay closed: {Error}", error?.Message);
-            _isConnected = false;
-            return Task.CompletedTask;
-        };
-
-        await _hubConnection.StartAsync(stoppingToken);
-        _isConnected = true;
-        _logger.LogInformation("Connected to cloud relay");
-
-        // Start telemetry pump to cloud
-        _ = TelemetryPumpAsync(stoppingToken);
-
-        // Wait until cancelled
-        await Task.Delay(Timeout.Infinite, stoppingToken);
-    }
-
-    private async Task TelemetryPumpAsync(CancellationToken stoppingToken)
-    {
-        _logger.LogInformation("Starting cloud telemetry pump");
-        
-        var updateCounter = 0;
-        var ping = new System.Net.NetworkInformation.Ping();
-        long lastPingMs = -1;
-        List<WifiMonitor.NearbyAp> nearbyAps = new();
-
-        try
-        {
-            while (!stoppingToken.IsCancellationRequested && _isConnected && _hubConnection?.State == HubConnectionState.Connected)
-            {
-                try
-                {
-                // Evaluate safety state
-                var (safetyState, _, _) = _safetyMachine.Evaluate();
-
-                // Get system info
-                var cpuTemp = GetCpuTemp();
-
-                // Ping every 8th iteration
-                if (updateCounter % 8 == 0)
-                {
-                    try
-                    {
-                        var reply = await ping.SendPingAsync("8.8.8.8", 1000);
-                        lastPingMs = reply.Status == System.Net.NetworkInformation.IPStatus.Success ? reply.RoundtripTime : -1;
-                    }
-                    catch { lastPingMs = -1; }
-                }
-
-                // Get Wi-Fi state
-                var (rssi, bssid, ssid, freq, txMbps, rxMbps, connected, lastUpdate, lastRoam, avgRtt) = _wifiState.Get();
-                var (_, motorsInhibited, lastStopReason) = _safetyMachine.GetStatus();
-
-                // Scan nearby APs every 20th iteration
-                if (updateCounter % 20 == 0)
-                {
-                    try { nearbyAps = await _wifiMonitor.GetNearbyApsAsync(ssid); }
-                    catch { }
-                }
-
-                var wifiSignalPercent = connected ? Math.Clamp((int)((rssi + 100) * 100.0 / 70.0), 0, 100) : 0;
-
-                var telemetry = new
-                {
-                    wifi = new
-                    {
-                        state = safetyState.ToString(),
-                        connected,
-                        rssiDbm = rssi,
-                        bssid,
-                        ssid,
-                        freqMhz = freq,
-                        txBitrateMbps = txMbps,
-                        rxBitrateMbps = rxMbps,
-                        signalPercent = wifiSignalPercent,
-                        nearbyAps = nearbyAps.Select(ap => new
-                        {
-                            bssid = ap.Bssid,
-                            ssid = ap.Ssid,
-                            rssiDbm = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase) ? rssi : ap.RssiDbm,
-                            isCurrent = ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase)
-                        })
-                    },
-                    motors = new
-                    {
-                        inhibited = motorsInhibited,
-                        lastStopReason
-                    },
-                    system = new
-                    {
-                        cpuTempC = cpuTemp,
-                        pingMs = lastPingMs
-                    }
-                };
-
-                await _hubConnection.InvokeAsync("SendTelemetry", telemetry, stoppingToken);
-                updateCounter++;
-            }
-            catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Error sending telemetry to cloud");
-                }
-
-                await Task.Delay(250, stoppingToken); // 4Hz
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Cloud telemetry pump crashed");
-        }
-        
-        _logger.LogWarning("Cloud telemetry pump stopped. Connected: {Connected}, HubState: {State}", 
-            _isConnected, _hubConnection?.State);
-    }
-
-    private double GetCpuTemp()
-    {
-        try
-        {
-            if (File.Exists("/sys/class/thermal/thermal_zone0/temp"))
-            {
-                var tempStr = File.ReadAllText("/sys/class/thermal/thermal_zone0/temp").Trim();
-                if (double.TryParse(tempStr, out var temp))
-                    return temp / 1000.0;
-            }
-        }
-        catch { }
-        return 0;
-    }
-
-    // Command handlers
-    private void OnMotorCommand(MotorCommandData data)
-    {
-        // Check if cloud operator is allowed to control
-        if (!_operatorManager.CanCloudOperate())
-        {
-            _logger.LogDebug("Cloud motor command ignored - not the operator");
-            return;
-        }
-        if (_safetyMachine.AreMotorsInhibited()) return;
-        _roverState.Touch();
-        _roverState.Set(Clamp(data.Left), Clamp(data.Right));
-    }
-
-    private void OnStop()
-    {
-        // Stop is always allowed (safety)
-        _roverState.Set(0, 0);
-    }
-
-    private void OnHeadlight(HeadlightData data)
-    {
-        // Headlight requires operator status
-        if (!_operatorManager.CanCloudOperate())
-        {
-            _logger.LogDebug("Cloud headlight command ignored - not the operator");
-            return;
-        }
-        _gpio.SetHeadlight(data.On);
-    }
-
-    private void OnIrLed(IrLedData data)
-    {
-        // IR LED requires operator status
-        if (!_operatorManager.CanCloudOperate())
-        {
-            _logger.LogDebug("Cloud IR LED command ignored - not the operator");
-            return;
-        }
-        _gpio.SetIrLed(data.On);
-    }
-
-    private async void OnRescan(RescanData data)
-    {
-        // Rescan requires operator status
-        if (!_operatorManager.CanCloudOperate())
-        {
-            _logger.LogDebug("Cloud rescan command ignored - not the operator");
-            if (_hubConnection?.State == HubConnectionState.Connected)
-            {
-                try
-                {
-                    await _hubConnection.InvokeAsync("SendToClient", data.ClientConnectionId, "RescanResult", new { result = "denied:not_operator" });
-                }
-                catch { }
-            }
-            return;
-        }
-
-        try
-        {
-            if (_hubConnection?.State == HubConnectionState.Connected)
-            {
-                await _hubConnection.InvokeAsync("SendToClient", data.ClientConnectionId, "RescanResult", new { result = "started" });
-            }
-
-            var result = await TriggerRescanAndRoamAsync();
-
-            if (_hubConnection?.State == HubConnectionState.Connected)
-            {
-                await _hubConnection.InvokeAsync("SendToClient", data.ClientConnectionId, "RescanResult", new { result });
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Rescan error");
-        }
-    }
-
-    private void OnClientJoined(ClientJoinedData data)
-    {
-        _logger.LogInformation("Cloud client joined: {Name}", data.Name);
-    }
-
-    private void OnClientLeft(ClientLeftData data)
-    {
-        _logger.LogInformation("Cloud client left: {ConnectionId}", data.ConnectionId);
-    }
-
-    private void OnOperatorChanged(OperatorChangedData data)
-    {
-        var success = _operatorManager.SetCloudOperator(data.Name);
-        if (success)
-        {
-            _logger.LogInformation("Cloud operator set: {Name}", data.Name);
-        }
-        else
-        {
-            _logger.LogWarning("Cloud operator '{Name}' blocked - local operator active", data.Name);
-            // Notify cloud that this operator was rejected
-            NotifyCloudOperatorRejected(data.Name);
-        }
-    }
-
-    private async void NotifyCloudOperatorRejected(string cloudOperatorName)
-    {
-        if (_hubConnection?.State == HubConnectionState.Connected)
-        {
-            try
-            {
-                var localOpName = _operatorManager.GetCurrentOperatorName();
-                await _hubConnection.InvokeAsync("OperatorRejected", cloudOperatorName, localOpName ?? "local pilot");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to notify cloud of operator rejection");
-            }
-        }
-    }
-
-    private void OnOperatorReleased()
-    {
-        _operatorManager.SetCloudOperator(null);
-        _roverState.Set(0, 0);
-        _logger.LogInformation("Cloud operator released");
-    }
-
-    private void OnOperatorDisconnected()
-    {
-        _operatorManager.SetCloudOperator(null);
-        _roverState.Set(0, 0);
-        _logger.LogInformation("Cloud operator disconnected");
-    }
-
-    private void OnWebRtcSignal(WebRtcSignalData data)
-    {
-        // WebRTC signaling for video - to be implemented with camera integration
-        _logger.LogDebug("Received WebRTC signal from client {ClientId}", data.ClientConnectionId);
-    }
-
-    private async void OnWhepRequest(WhepRequestData data)
-    {
-        _logger.LogInformation("Received WHEP request: {RequestId}", data.RequestId);
-
-        try
-        {
-            using var httpClient = new HttpClient();
-            httpClient.Timeout = TimeSpan.FromSeconds(15);
-
-            // Get the local WHEP URL from config or use default
-            var whepUrl = _config["CloudRelay:LocalWhepUrl"] ?? "http://127.0.0.1:8889/cam/whep";
-
-            // Forward the SDP offer to local mediamtx
-            var content = new StringContent(data.SdpOffer, Encoding.UTF8, "application/sdp");
-            var response = await httpClient.PostAsync(whepUrl, content);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                var error = await response.Content.ReadAsStringAsync();
-                _logger.LogError("Local WHEP failed: {StatusCode} - {Error}", response.StatusCode, error);
-
-                if (_hubConnection?.State == HubConnectionState.Connected)
-                {
-                    await _hubConnection.InvokeAsync("WhepResponse", data.RequestId, false, null, $"WHEP failed: {response.StatusCode}");
-                }
-                return;
-            }
-
-            var sdpAnswer = await response.Content.ReadAsStringAsync();
-            _logger.LogInformation("WHEP success, got SDP answer");
-
-            if (_hubConnection?.State == HubConnectionState.Connected)
-            {
-                await _hubConnection.InvokeAsync("WhepResponse", data.RequestId, true, sdpAnswer, null);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "WHEP request error");
-
-            if (_hubConnection?.State == HubConnectionState.Connected)
-            {
-                try
-                {
-                    await _hubConnection.InvokeAsync("WhepResponse", data.RequestId, false, null, ex.Message);
-                }
-                catch { }
-            }
-        }
-    }
-
-    private static int Clamp(int v) => Math.Max(-255, Math.Min(255, v));
-
-    private static async Task<string> TriggerRescanAndRoamAsync()
-    {
-        // Same implementation as the static method in Program.cs
-        // Abbreviated here - in real code, extract to shared method
-        try
-        {
-            var downPsi = new ProcessStartInfo
-            {
-                FileName = "/usr/sbin/ifconfig",
-                Arguments = "wlan0 down",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (var downProcess = Process.Start(downPsi))
-            {
-                if (downProcess != null) await downProcess.WaitForExitAsync();
-            }
-
-            await Task.Delay(1500);
-
-            var upPsi = new ProcessStartInfo
-            {
-                FileName = "/usr/sbin/ifconfig",
-                Arguments = "wlan0 up",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (var upProcess = Process.Start(upPsi))
-            {
-                if (upProcess != null) await upProcess.WaitForExitAsync();
-            }
-
-            await Task.Delay(3000);
-            return "completed";
-        }
-        catch (Exception ex)
-        {
-            return $"error:{ex.Message}";
-        }
-    }
-
-    public override void Dispose()
-    {
-        _operatorManager.OnOperatorChanged -= OnLocalOperatorChanged;
-        _hubConnection?.DisposeAsync().AsTask().Wait();
-        base.Dispose();
-    }
-}
-
-// DTOs for SignalR messages
-record MotorCommandData(int Left, int Right);
-record HeadlightData(bool On);
-record IrLedData(bool On);
-record RescanData(string ClientConnectionId);
-record ClientJoinedData(string ConnectionId, string Name);
-record ClientLeftData(string ConnectionId);
-record OperatorChangedData(string Name);
-record WebRtcSignalData(string ClientConnectionId, object Signal);
-record WhepRequestData(string RequestId, string SdpOffer, object? TurnConfig);
-record TurnConfigData(string[] Urls, string Username, string Credential);
+// ===== Serial Pump =====
