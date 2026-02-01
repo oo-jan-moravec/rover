@@ -72,8 +72,8 @@ let maxVelocityPercent = parseFloat(localStorage.getItem('maxVelocity') || '100'
 let spinSpeedPercent = parseFloat(localStorage.getItem('spinSpeed') || '50');
 let turnThresholdPercent = parseFloat(localStorage.getItem('turnThreshold') || '15');
 let spinZonePercent = parseFloat(localStorage.getItem('spinZone') || '15');
-let forwardTrim = parseInt(localStorage.getItem('forwardTrim') || '0');
-let reverseTrim = parseInt(localStorage.getItem('reverseTrim') || '0');
+let forwardTrim = Math.max(-10, Math.min(10, parseInt(localStorage.getItem('forwardTrim') || '0')));
+let reverseTrim = Math.max(-10, Math.min(10, parseInt(localStorage.getItem('reverseTrim') || '0')));
 let headlightOn = false;
 let irLedOn = false;
 
@@ -840,7 +840,7 @@ if (mobileSplitter && isMobile()) {
 // Knob controls
 function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, maxVal, formatFn) {
   let isDragging = false;
-  let startAngle = 0;
+  let startY = 0;
   let startValue = 0;
   
   const angleRange = 270; // Total rotation range in degrees
@@ -857,66 +857,69 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
     valueEl.textContent = formatFn(getValue());
   }
   
-  function getAngleFromEvent(e) {
-    const rect = knobEl.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
-    const dx = e.clientX - centerX;
-    const dy = e.clientY - centerY;
-    return Math.atan2(dy, dx) * (180 / Math.PI);
-  }
-  
-  function handleMove(e) {
+  function handleMove(y) {
     if (!isDragging || !isOperator) return;
     
-    const currentAngle = getAngleFromEvent(e);
-    let angleDelta = currentAngle - startAngle;
+    // Vertical drag: UP increases value, DOWN decreases
+    const deltaY = startY - y;
+    const sensitivity = 150; // pixels for full range
+    const range = maxVal - minVal;
     
-    // Handle wrapping
-    if (angleDelta > 180) angleDelta -= 360;
-    if (angleDelta < -180) angleDelta += 360;
-    
-    const valueDelta = (angleDelta / angleRange) * (maxVal - minVal);
+    const valueDelta = (deltaY / sensitivity) * range;
     const newValue = Math.max(minVal, Math.min(maxVal, startValue + valueDelta));
     
     setValue(newValue);
     updateDisplay();
   }
+
+  function startDrag(y) {
+    if (!isOperator) return;
+    isDragging = true;
+    startY = y;
+    startValue = getValue();
+    
+    // Visual feedback: Zoom in
+    knobEl.style.cursor = 'grabbing';
+    knobEl.style.transform = 'scale(2.5)';
+    knobEl.style.zIndex = '1000';
+    knobEl.style.transition = 'transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+  }
+
+  function endDrag() {
+    if (!isDragging) return;
+    isDragging = false;
+    
+    // Visual feedback: Zoom out
+    knobEl.style.cursor = 'pointer';
+    knobEl.style.transform = 'scale(1)';
+    knobEl.style.zIndex = '';
+  }
   
   knobEl.addEventListener('mousedown', (e) => {
-    if (!isOperator) return;
     e.preventDefault();
-    isDragging = true;
-    startAngle = getAngleFromEvent(e);
-    startValue = getValue();
-    knobEl.style.cursor = 'grabbing';
+    startDrag(e.clientY);
   });
   
-  window.addEventListener('mousemove', handleMove);
-  
-  window.addEventListener('mouseup', () => {
-    isDragging = false;
-    knobEl.style.cursor = 'pointer';
+  window.addEventListener('mousemove', (e) => {
+    if (isDragging) handleMove(e.clientY);
   });
+  
+  window.addEventListener('mouseup', endDrag);
   
   knobEl.addEventListener('touchstart', (e) => {
     if (!isOperator) return;
     e.preventDefault();
-    isDragging = true;
-    const touch = e.touches[0];
-    startAngle = getAngleFromEvent(touch);
-    startValue = getValue();
+    startDrag(e.touches[0].clientY);
   }, { passive: false });
   
   window.addEventListener('touchmove', (e) => {
     if (isDragging && e.touches.length > 0) {
-      handleMove(e.touches[0]);
+      e.preventDefault();
+      handleMove(e.touches[0].clientY);
     }
   }, { passive: false });
   
-  window.addEventListener('touchend', () => {
-    isDragging = false;
-  });
+  window.addEventListener('touchend', endDrag);
   
   updateDisplay();
 }
@@ -981,7 +984,7 @@ setupKnob(
   (val) => `${Math.round(val)}%`
 );
 
-// Setup Forward Trim Knob (-50 to 50)
+// Setup Forward Trim Knob (-10 to 10)
 setupKnob(
   fwdKnob,
   fwdIndicator,
@@ -991,15 +994,15 @@ setupKnob(
     forwardTrim = Math.round(val);
     localStorage.setItem('forwardTrim', forwardTrim.toString());
   },
-  -50,
-  50,
+  -10,
+  10,
   (val) => {
     const rounded = Math.round(val);
     return rounded > 0 ? `+${rounded}` : rounded.toString();
   }
 );
 
-// Setup Reverse Trim Knob (-50 to 50)
+// Setup Reverse Trim Knob (-10 to 10)
 setupKnob(
   revKnob,
   revIndicator,
@@ -1009,8 +1012,8 @@ setupKnob(
     reverseTrim = Math.round(val);
     localStorage.setItem('reverseTrim', reverseTrim.toString());
   },
-  -50,
-  50,
+  -10,
+  10,
   (val) => {
     const rounded = Math.round(val);
     return rounded > 0 ? `+${rounded}` : rounded.toString();
