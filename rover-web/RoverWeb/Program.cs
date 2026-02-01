@@ -416,49 +416,31 @@ sealed class WifiRecoveryWatchdog : BackgroundService
     }
 
     /// <summary>
-    /// Trigger a Wi-Fi interface restart, rescan, and roam to the best available AP
+    /// Trigger a Wi-Fi recovery using surgical methods (soft reassociate/roam) first,
+    /// falling back to a hard interface reset if necessary.
     /// </summary>
     public static async Task<string> TriggerRescanAndRoamAsync()
     {
         try
         {
-            // Step 1: Restart the Wi-Fi interface to force a fresh scan
-            // This clears any driver state issues and finds all APs
-            var downPsi = new ProcessStartInfo
+            // Step 1: Try soft recovery (reassociate)
+            // Forces the chip to re-scan and connect to the best known AP without dropping the driver.
+            var reassociatePsi = new ProcessStartInfo
             {
-                FileName = "/usr/sbin/ifconfig",
-                Arguments = "wlan0 down",
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = "-i wlan0 reassociate",
                 RedirectStandardOutput = true,
-                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-
-            using (var downProcess = Process.Start(downPsi))
+            
+            using (var reassociateProcess = Process.Start(reassociatePsi))
             {
-                if (downProcess != null)
-                    await downProcess.WaitForExitAsync();
+                if (reassociateProcess != null)
+                    await reassociateProcess.WaitForExitAsync();
             }
 
-            await Task.Delay(1500); // Wait for interface to go down
-
-            var upPsi = new ProcessStartInfo
-            {
-                FileName = "/usr/sbin/ifconfig",
-                Arguments = "wlan0 up",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (var upProcess = Process.Start(upPsi))
-            {
-                if (upProcess != null)
-                    await upProcess.WaitForExitAsync();
-            }
-
-            await Task.Delay(3000); // Wait for interface to reconnect
+            await Task.Delay(1000); // Wait for reassociate to trigger
 
             // Step 2: Trigger scan
             var scanPsi = new ProcessStartInfo
@@ -478,6 +460,71 @@ sealed class WifiRecoveryWatchdog : BackgroundService
 
             await Task.Delay(2000); // Wait for scan to complete
 
+            // Step 3: Evaluate and potentially roam
+            var softResult = await EvaluateAndRoamAsync();
+            if (softResult.StartsWith("roamed") || softResult.StartsWith("already_best"))
+            {
+                return $"soft_{softResult}";
+            }
+
+            // Step 4: Fallback to hard recovery if soft recovery didn't result in a good connection
+            var downPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/ifconfig",
+                Arguments = "wlan0 down",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var downProcess = Process.Start(downPsi))
+            {
+                if (downProcess != null)
+                    await downProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(1500);
+
+            var upPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/ifconfig",
+                Arguments = "wlan0 up",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var upProcess = Process.Start(upPsi))
+            {
+                if (upProcess != null)
+                    await upProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(4000); // Wait for interface to reconnect
+
+            // One more scan after hard reset
+            using (var scanProcess = Process.Start(scanPsi))
+            {
+                if (scanProcess != null)
+                    await scanProcess.WaitForExitAsync();
+            }
+            await Task.Delay(2000);
+
+            var hardResult = await EvaluateAndRoamAsync();
+            return $"hard_{hardResult}";
+        }
+        catch (Exception ex)
+        {
+            return $"error:{ex.Message}";
+        }
+    }
+
+    private static async Task<string> EvaluateAndRoamAsync()
+    {
+        try
+        {
             // Get current connection info
             var linkPsi = new ProcessStartInfo
             {
