@@ -842,6 +842,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   let isDragging = false;
   let startY = 0;
   let startValue = 0;
+  let floatingValueEl = null;
   
   const angleRange = 270; // Total rotation range in degrees
   const minAngle = -135;  // Starting position
@@ -852,11 +853,36 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
   }
   
   function updateDisplay() {
-    const angle = valueToAngle(getValue());
+    const val = getValue();
+    const angle = valueToAngle(val);
     indicatorEl.style.transform = `rotate(${angle}deg)`;
-    valueEl.textContent = formatFn(getValue());
+    valueEl.textContent = formatFn(val);
+    if (floatingValueEl) {
+      floatingValueEl.textContent = formatFn(val);
+    }
   }
   
+  function updateFloatingPosition() {
+    if (!floatingValueEl) return;
+    const rect = knobEl.getBoundingClientRect();
+    
+    // Default: Place on the left
+    let left = rect.left - 15;
+    let top = rect.top + rect.height / 2;
+    
+    floatingValueEl.style.top = `${top}px`;
+    floatingValueEl.style.left = `${left}px`;
+    floatingValueEl.style.transform = 'translate(-100%, -50%)';
+    
+    // Check if it's overflowing the left edge
+    const floatRect = floatingValueEl.getBoundingClientRect();
+    if (floatRect.left < 10) {
+      // Not enough space on left, flip to the RIGHT of the knob
+      floatingValueEl.style.left = `${rect.right + 15}px`;
+      floatingValueEl.style.transform = 'translate(0, -50%)';
+    }
+  }
+
   function handleMove(y) {
     if (!isDragging || !isOperator) return;
     
@@ -870,6 +896,7 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
     
     setValue(newValue);
     updateDisplay();
+    updateFloatingPosition();
   }
 
   function startDrag(y) {
@@ -877,10 +904,33 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
     isDragging = true;
     startY = y;
     startValue = getValue();
+
+    // Create floating value display attached to body to avoid inherited scaling/clipping
+    floatingValueEl = document.createElement('div');
+    Object.assign(floatingValueEl.style, {
+      position: 'fixed',
+      backgroundColor: 'rgba(13, 17, 23, 0.95)',
+      color: '#58a6ff',
+      padding: '4px 10px',
+      borderRadius: '6px',
+      border: '2px solid #30363d',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+      fontSize: '18px',
+      fontWeight: '700',
+      zIndex: '9999',
+      pointerEvents: 'none',
+      fontFamily: 'ui-monospace, monospace'
+    });
+    
+    document.body.appendChild(floatingValueEl);
+    
+    // Initial position & content
+    updateFloatingPosition();
+    updateDisplay();
     
     // Visual feedback: Zoom in
     knobEl.style.cursor = 'grabbing';
-    knobEl.style.transform = 'scale(2.5)';
+    knobEl.style.transform = 'scale(1.8)';
     knobEl.style.zIndex = '1000';
     knobEl.style.transition = 'transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
   }
@@ -889,6 +939,11 @@ function setupKnob(knobEl, indicatorEl, valueEl, getValue, setValue, minVal, max
     if (!isDragging) return;
     isDragging = false;
     
+    if (floatingValueEl) {
+      floatingValueEl.remove();
+      floatingValueEl = null;
+    }
+
     // Visual feedback: Zoom out
     knobEl.style.cursor = 'pointer';
     knobEl.style.transform = 'scale(1)';
@@ -1030,10 +1085,19 @@ function toggleHeadlight(e) {
   e.stopPropagation();
   
   headlightOn = !headlightOn;
+  const icon = headlightBtn?.querySelector('i');
   if (headlightOn) {
     headlightBtn?.classList.add('active');
+    if (icon) {
+      icon.classList.remove('fa-lightbulb');
+      icon.classList.add('fa-lightbulb-on');
+    }
   } else {
     headlightBtn?.classList.remove('active');
+    if (icon) {
+      icon.classList.remove('fa-lightbulb-on');
+      icon.classList.add('fa-lightbulb');
+    }
   }
   send(`H ${headlightOn ? 1 : 0}`);
 }
@@ -1044,10 +1108,19 @@ function toggleIrLed(e) {
   e.stopPropagation();
   
   irLedOn = !irLedOn;
+  const icon = irLedBtn?.querySelector('i');
   if (irLedOn) {
     irLedBtn?.classList.add('active');
+    if (icon) {
+      icon.classList.remove('fa-eye-slash');
+      icon.classList.add('fa-eye');
+    }
   } else {
     irLedBtn?.classList.remove('active');
+    if (icon) {
+      icon.classList.remove('fa-eye');
+      icon.classList.add('fa-eye-slash');
+    }
   }
   send(`I ${irLedOn ? 1 : 0}`);
 }
