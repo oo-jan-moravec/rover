@@ -752,11 +752,8 @@ const disconnectStatus = document.getElementById('disconnectStatus');
 
 // Set camera feed source dynamically
 if (cameraFeed) {
-  // Use relative path for cloud tunnels, but direct port for local access (port 8080 or no dots)
-  const isLocal = location.port === "8080" || !location.hostname.includes('.');
-  cameraFeed.src = isLocal
-    ? `http://${location.hostname}:8889/cam/`
-    : "/cam/";
+  // Always use the proxied /cam/ path to ensure authentication
+  cameraFeed.src = "/cam/";
 }
 
 let isSplitterDragging = false;
