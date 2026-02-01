@@ -19,6 +19,7 @@ builder.Services.AddSingleton<WifiMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WifiMonitor>());
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
+builder.Services.AddHostedService<WifiRecoveryWatchdog>();
 var app = builder.Build();
 
 app.UseDefaultFiles();
@@ -220,7 +221,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                         try
                         {
                             await wsManager.SendToClientAsync(clientId, "RESCAN:started");
-                            var result = await TriggerRescanAndRoamAsync();
+                            var result = await WifiRecoveryWatchdog.TriggerRescanAndRoamAsync();
                             await wsManager.SendToClientAsync(clientId, $"RESCAN:{result}");
                         }
                         catch (Exception ex)
@@ -257,196 +258,245 @@ app.Run("http://0.0.0.0:8080");
 
 static int Clamp(int v) => Math.Max(-255, Math.Min(255, v));
 
-/// <summary>
-/// Trigger a Wi-Fi interface restart, rescan, and roam to the best available AP
-/// </summary>
-static async Task<string> TriggerRescanAndRoamAsync()
+sealed class WifiRecoveryWatchdog : BackgroundService
 {
-    try
+    private readonly RoverState _state;
+    private readonly OperatorManager _opManager;
+    private readonly ILogger<WifiRecoveryWatchdog> _logger;
+    private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(1);
+
+    public WifiRecoveryWatchdog(RoverState state, OperatorManager opManager, ILogger<WifiRecoveryWatchdog> logger)
     {
-        // Step 1: Restart the Wi-Fi interface to force a fresh scan
-        // This clears any driver state issues and finds all APs
-        var downPsi = new ProcessStartInfo
+        _state = state;
+        _opManager = opManager;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("WifiRecoveryWatchdog started. Timeout: {Timeout}", Timeout);
+
+        while (!stoppingToken.IsCancellationRequested)
         {
-            FileName = "/usr/sbin/ifconfig",
-            Arguments = "wlan0 down",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
-        using (var downProcess = Process.Start(downPsi))
-        {
-            if (downProcess != null)
-                await downProcess.WaitForExitAsync();
-        }
-
-        await Task.Delay(1500); // Wait for interface to go down
-
-        var upPsi = new ProcessStartInfo
-        {
-            FileName = "/usr/sbin/ifconfig",
-            Arguments = "wlan0 up",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using (var upProcess = Process.Start(upPsi))
-        {
-            if (upProcess != null)
-                await upProcess.WaitForExitAsync();
-        }
-
-        await Task.Delay(3000); // Wait for interface to reconnect
-
-        // Step 2: Trigger scan
-        var scanPsi = new ProcessStartInfo
-        {
-            FileName = "/usr/sbin/wpa_cli",
-            Arguments = "-i wlan0 scan",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using (var scanProcess = Process.Start(scanPsi))
-        {
-            if (scanProcess != null)
-                await scanProcess.WaitForExitAsync();
-        }
-
-        await Task.Delay(2000); // Wait for scan to complete
-
-        // Get current connection info
-        var linkPsi = new ProcessStartInfo
-        {
-            FileName = "/usr/sbin/iw",
-            Arguments = "dev wlan0 link",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        string currentBssid = "";
-        string currentSsid = "";
-        int currentRssi = -100;
-
-        using (var linkProcess = Process.Start(linkPsi))
-        {
-            if (linkProcess != null)
+            if (_opManager.HasOperator())
             {
-                var linkOutput = await linkProcess.StandardOutput.ReadToEndAsync();
-                await linkProcess.WaitForExitAsync();
+                var (_, _, lastUpdate) = _state.Get();
+                var idleTime = DateTime.UtcNow - lastUpdate;
 
-                var bssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"Connected to ([0-9a-fA-F:]+)");
-                if (bssidMatch.Success)
-                    currentBssid = bssidMatch.Groups[1].Value.ToUpper();
-
-                var ssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"SSID: (.+)");
-                if (ssidMatch.Success)
-                    currentSsid = ssidMatch.Groups[1].Value.Trim();
-
-                var signalMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"signal: (-?\d+)");
-                if (signalMatch.Success && int.TryParse(signalMatch.Groups[1].Value, out var rssi))
-                    currentRssi = rssi;
-            }
-        }
-
-        // Get scan results
-        var resultsPsi = new ProcessStartInfo
-        {
-            FileName = "/usr/sbin/wpa_cli",
-            Arguments = "-i wlan0 scan_results",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        string bestBssid = "";
-        int bestRssi = -100;
-
-        using (var resultsProcess = Process.Start(resultsPsi))
-        {
-            if (resultsProcess != null)
-            {
-                var resultsOutput = await resultsProcess.StandardOutput.ReadToEndAsync();
-                await resultsProcess.WaitForExitAsync();
-
-                var lines = resultsOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                foreach (var line in lines.Skip(1))
+                if (idleTime > Timeout)
                 {
-                    var parts = line.Split('\t');
-                    if (parts.Length >= 4)
+                    _logger.LogWarning("Operator present but no command received for {IdleTime}s. Triggering Wi-Fi recovery...", (int)idleTime.TotalSeconds);
+                    
+                    // Reset the timer so we don't spam restarts
+                    _state.Touch();
+
+                    try
                     {
-                        var ssid = parts.Length >= 5 ? parts[4].Trim() : "";
-
-                        // Only consider APs with same SSID or empty SSID (mesh nodes)
-                        if (!string.IsNullOrEmpty(currentSsid) &&
-                            ssid != currentSsid && !string.IsNullOrEmpty(ssid))
-                            continue;
-
-                        if (int.TryParse(parts[2], out var apRssi) && apRssi > bestRssi)
-                        {
-                            bestRssi = apRssi;
-                            bestBssid = parts[0].ToUpper();
-                        }
+                        var result = await TriggerRescanAndRoamAsync();
+                        _logger.LogInformation("Automatic Wi-Fi recovery result: {Result}", result);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error during automatic Wi-Fi recovery");
                     }
                 }
             }
         }
+    }
 
-        // Check if we should roam
-        if (string.IsNullOrEmpty(bestBssid))
+    /// <summary>
+    /// Trigger a Wi-Fi interface restart, rescan, and roam to the best available AP
+    /// </summary>
+    public static async Task<string> TriggerRescanAndRoamAsync()
+    {
+        try
         {
-            return "no_aps_found";
-        }
-
-        if (bestBssid.Equals(currentBssid, StringComparison.OrdinalIgnoreCase))
-        {
-            return $"already_best:{bestRssi}";
-        }
-
-        if (bestRssi <= currentRssi + 3) // Need at least 3dB improvement
-        {
-            return $"no_better_ap:{currentRssi}:{bestRssi}";
-        }
-
-        // Roam to best AP
-        var roamPsi = new ProcessStartInfo
-        {
-            FileName = "/usr/sbin/wpa_cli",
-            Arguments = $"-i wlan0 roam {bestBssid}",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using (var roamProcess = Process.Start(roamPsi))
-        {
-            if (roamProcess != null)
+            // Step 1: Restart the Wi-Fi interface to force a fresh scan
+            // This clears any driver state issues and finds all APs
+            var downPsi = new ProcessStartInfo
             {
-                var roamOutput = await roamProcess.StandardOutput.ReadToEndAsync();
-                await roamProcess.WaitForExitAsync();
+                FileName = "/usr/sbin/ifconfig",
+                Arguments = "wlan0 down",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
 
-                if (roamOutput.Contains("OK"))
+            using (var downProcess = Process.Start(downPsi))
+            {
+                if (downProcess != null)
+                    await downProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(1500); // Wait for interface to go down
+
+            var upPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/ifconfig",
+                Arguments = "wlan0 up",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var upProcess = Process.Start(upPsi))
+            {
+                if (upProcess != null)
+                    await upProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(3000); // Wait for interface to reconnect
+
+            // Step 2: Trigger scan
+            var scanPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = "-i wlan0 scan",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var scanProcess = Process.Start(scanPsi))
+            {
+                if (scanProcess != null)
+                    await scanProcess.WaitForExitAsync();
+            }
+
+            await Task.Delay(2000); // Wait for scan to complete
+
+            // Get current connection info
+            var linkPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/iw",
+                Arguments = "dev wlan0 link",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            string currentBssid = "";
+            string currentSsid = "";
+            int currentRssi = -100;
+
+            using (var linkProcess = Process.Start(linkPsi))
+            {
+                if (linkProcess != null)
                 {
-                    return $"roamed:{bestBssid}:{bestRssi}";
-                }
-                else
-                {
-                    return $"roam_failed:{roamOutput.Trim()}";
+                    var linkOutput = await linkProcess.StandardOutput.ReadToEndAsync();
+                    await linkProcess.WaitForExitAsync();
+
+                    var bssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"Connected to ([0-9a-fA-F:]+)");
+                    if (bssidMatch.Success)
+                        currentBssid = bssidMatch.Groups[1].Value.ToUpper();
+
+                    var ssidMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"SSID: (.+)");
+                    if (ssidMatch.Success)
+                        currentSsid = ssidMatch.Groups[1].Value.Trim();
+
+                    var signalMatch = System.Text.RegularExpressions.Regex.Match(linkOutput, @"signal: (-?\d+)");
+                    if (signalMatch.Success && int.TryParse(signalMatch.Groups[1].Value, out var rssi))
+                        currentRssi = rssi;
                 }
             }
-        }
 
-        return "unknown_error";
-    }
-    catch (Exception ex)
-    {
-        return $"error:{ex.Message}";
+            // Get scan results
+            var resultsPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = "-i wlan0 scan_results",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            string bestBssid = "";
+            int bestRssi = -100;
+
+            using (var resultsProcess = Process.Start(resultsPsi))
+            {
+                if (resultsProcess != null)
+                {
+                    var resultsOutput = await resultsProcess.StandardOutput.ReadToEndAsync();
+                    await resultsProcess.WaitForExitAsync();
+
+                    var lines = resultsOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in lines.Skip(1))
+                    {
+                        var parts = line.Split('\t');
+                        if (parts.Length >= 4)
+                        {
+                            var ssid = parts.Length >= 5 ? parts[4].Trim() : "";
+
+                            // Only consider APs with same SSID or empty SSID (mesh nodes)
+                            if (!string.IsNullOrEmpty(currentSsid) &&
+                                ssid != currentSsid && !string.IsNullOrEmpty(ssid))
+                                continue;
+
+                            if (int.TryParse(parts[2], out var apRssi) && apRssi > bestRssi)
+                            {
+                                bestRssi = apRssi;
+                                bestBssid = parts[0].ToUpper();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if we should roam
+            if (string.IsNullOrEmpty(bestBssid))
+            {
+                return "no_aps_found";
+            }
+
+            if (bestBssid.Equals(currentBssid, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"already_best:{bestRssi}";
+            }
+
+            if (bestRssi <= currentRssi + 3) // Need at least 3dB improvement
+            {
+                return $"no_better_ap:{currentRssi}:{bestRssi}";
+            }
+
+            // Roam to best AP
+            var roamPsi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = $"-i wlan0 roam {bestBssid}",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var roamProcess = Process.Start(roamPsi))
+            {
+                if (roamProcess != null)
+                {
+                    var roamOutput = await roamProcess.StandardOutput.ReadToEndAsync();
+                    await roamProcess.WaitForExitAsync();
+
+                    if (roamOutput.Contains("OK"))
+                    {
+                        return $"roamed:{bestBssid}:{bestRssi}";
+                    }
+                    else
+                    {
+                        return $"roam_failed:{roamOutput.Trim()}";
+                    }
+                }
+            }
+
+            return "unknown_error";
+        }
+        catch (Exception ex)
+        {
+            return $"error:{ex.Message}";
+        }
     }
 }
 
