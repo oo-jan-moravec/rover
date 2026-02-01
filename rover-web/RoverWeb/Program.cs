@@ -22,6 +22,54 @@ builder.Services.AddHostedService<DiagnosticsPump>();
 builder.Services.AddHostedService<WifiRecoveryWatchdog>();
 var app = builder.Build();
 
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value?.ToLowerInvariant();
+    
+    // Allow access to login page, login API, and static assets needed for login
+    if (path == "/login.html" || path == "/api/login" || (path != null && path.StartsWith("/favicon.ico")))
+    {
+        await next();
+        return;
+    }
+
+    var expectedPassword = app.Configuration["RoverPassword"];
+    if (!context.Request.Cookies.TryGetValue("RoverAuth", out var authCookie) || authCookie != expectedPassword)
+    {
+        if (path == "/ws")
+        {
+            context.Response.StatusCode = 401;
+            return;
+        }
+        context.Response.Redirect("/login.html");
+        return;
+    }
+
+    await next();
+});
+
+app.MapPost("/api/login", async (HttpContext context) =>
+{
+    using var reader = new StreamReader(context.Request.Body);
+    var body = await reader.ReadToEndAsync();
+    var data = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
+    
+    var expectedPassword = app.Configuration["RoverPassword"];
+    if (data != null && data.TryGetValue("password", out var password) && password == expectedPassword)
+    {
+        context.Response.Cookies.Append("RoverAuth", expectedPassword, new CookieOptions 
+        { 
+            HttpOnly = true, 
+            Secure = false, // Set to true if using HTTPS
+            SameSite = SameSiteMode.Strict,
+            Expires = DateTimeOffset.UtcNow.AddDays(7)
+        });
+        return Results.Ok();
+    }
+    
+    return Results.Unauthorized();
+});
+
 app.UseDefaultFiles();
 
 // Disable caching for all static files to ensure clients always get fresh code
