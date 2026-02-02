@@ -3,3 +3,4 @@ obj
 rover-web/RoverWeb/Properties/launchSettings.json
 rover-web/DEPLOYMENT.md
 rover-web/RoverWeb/publish
+rover-web/SECURITY-CHECK-SECRETS.md

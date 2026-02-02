@@ -1,0 +1,21 @@
+# Local / override config (may contain secrets)
+RoverWeb/appsettings.Local.json
+*.Local.json
+.env
+.env.local
+.env.*.local
+
+# Build / IDE
+bin/
+obj/
+.vs/
+*.user
+*.suo
+.DS_Store
+
+# .NET
+*.dll
+*.pdb
+*.log
+project.lock.json
+packages/

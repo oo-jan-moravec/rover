@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Colors
 function Write-ColorOutput {
@@ -27,6 +28,7 @@ Write-Host "  User:        $RpiUser"
 Write-Host "  Host:        $RpiHost"
 Write-Host "  Deploy Dir:  $RpiDeployDir"
 Write-Host "  Arch:        $RpiArch"
+Write-Host "  .env:        $(Join-Path $scriptPath '.env') (RoverPassword burned at deploy)"
 Write-Host ""
 
 # Check SSH connectivity
@@ -45,7 +47,6 @@ Write-ColorOutput "✓ SSH connection successful" "Green"
 Write-Host ""
 
 # Navigate to project directory
-$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectDir = Join-Path $scriptPath "RoverWeb"
 Set-Location $projectDir
 
@@ -65,6 +66,39 @@ if (-not (Test-Path $publishDir)) {
 }
 
 Write-ColorOutput "✓ Build successful!" "Green"
+Write-Host ""
+
+# Load .env and burn RoverPassword into appsettings.json for deployment
+$envPath = Join-Path $scriptPath ".env"
+if (-not (Test-Path $envPath)) {
+    Write-ColorOutput "Error: .env file not found at $envPath" "Red"
+    Write-Host "Copy .env.example to .env and set ROVER_PASSWORD=your_password"
+    exit 1
+}
+
+$envVars = @{}
+Get-Content $envPath | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -and -not $line.StartsWith("#") -and $line -match '^\s*([^#=]+)=(.*)$') {
+        $val = $matches[2].Trim()
+        if ($val.Length -ge 2 -and $val.StartsWith('"') -and $val.EndsWith('"')) { $val = $val.Substring(1, $val.Length - 2) }
+        $envVars[$matches[1].Trim()] = $val
+    }
+}
+
+$roverPassword = $envVars["ROVER_PASSWORD"]
+if (-not $roverPassword) {
+    Write-ColorOutput "Error: ROVER_PASSWORD is not set in .env" "Red"
+    Write-Host "Add a line: ROVER_PASSWORD=your_rover_web_password"
+    exit 1
+}
+
+$appsettingsPath = Join-Path $publishDir "appsettings.json"
+$appsettings = Get-Content $appsettingsPath -Raw | ConvertFrom-Json
+$appsettings.RoverPassword = $roverPassword
+$appsettings | ConvertTo-Json -Depth 10 | Set-Content $appsettingsPath -NoNewline
+
+Write-ColorOutput "✓ RoverPassword injected from .env into appsettings.json" "Green"
 Write-Host ""
 
 # Create deployment directory on RPi

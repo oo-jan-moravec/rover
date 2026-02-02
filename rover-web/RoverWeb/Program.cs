@@ -23,6 +23,14 @@ builder.Services.AddHostedService<WifiRecoveryWatchdog>();
 builder.Services.AddHttpClient();
 var app = builder.Build();
 
+// Require RoverPassword to be set (e.g. via env var RoverPassword or User Secrets)
+var roverPassword = app.Configuration["RoverPassword"];
+if (string.IsNullOrWhiteSpace(roverPassword))
+{
+    throw new InvalidOperationException(
+        "RoverPassword must be set. Use environment variable RoverPassword or add to User Secrets.");
+}
+
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value?.ToLowerInvariant();
@@ -34,7 +42,7 @@ app.Use(async (context, next) =>
         return;
     }
 
-    var expectedPassword = app.Configuration["RoverPassword"];
+    var expectedPassword = roverPassword;
     if (!context.Request.Cookies.TryGetValue("RoverAuth", out var authCookie) || authCookie != expectedPassword)
     {
         if (path == "/ws")
@@ -55,7 +63,7 @@ app.MapPost("/api/login", async (HttpContext context) =>
     var body = await reader.ReadToEndAsync();
     var data = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
     
-    var expectedPassword = app.Configuration["RoverPassword"];
+    var expectedPassword = roverPassword;
     if (data != null && data.TryGetValue("password", out var password) && password == expectedPassword)
     {
         context.Response.Cookies.Append("RoverAuth", expectedPassword, new CookieOptions 

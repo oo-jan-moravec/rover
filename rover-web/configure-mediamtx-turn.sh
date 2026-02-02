@@ -33,26 +33,19 @@ if grep -q "turn:global.relay.metered.ca" "$MEDIAMTX_CONFIG"; then
   exit 0
 fi
 
-# Add TURN configuration after webrtcICEServers2 line
-# Using metered.ca free Open Relay servers
-cat >> "$MEDIAMTX_CONFIG" << 'EOF'
+# TURN credentials: set TURN_USERNAME and TURN_PASSWORD (e.g. from metered.ca)
+# Example: export TURN_USERNAME=your_username TURN_PASSWORD=your_password
+if [ -z "$TURN_USERNAME" ] || [ -z "$TURN_PASSWORD" ]; then
+  echo "ERROR: Set TURN_USERNAME and TURN_PASSWORD environment variables before running."
+  echo "Example: export TURN_USERNAME=xxx TURN_PASSWORD=yyy"
+  exit 1
+fi
 
-# TURN servers for NAT traversal (added by configure-mediamtx-turn.sh)
-webrtcICEServers2:
-  - url: stun:stun.l.google.com:19302
-  - url: turn:global.relay.metered.ca:80
-    username: e8dd65b92f7b2ae09c6ce5f5
-    password: uJHoAaKKzxdjt7GW
-  - url: turn:global.relay.metered.ca:80?transport=tcp
-    username: e8dd65b92f7b2ae09c6ce5f5
-    password: uJHoAaKKzxdjt7GW
-  - url: turn:global.relay.metered.ca:443
-    username: e8dd65b92f7b2ae09c6ce5f5
-    password: uJHoAaKKzxdjt7GW
-  - url: turns:global.relay.metered.ca:443?transport=tcp
-    username: e8dd65b92f7b2ae09c6ce5f5
-    password: uJHoAaKKzxdjt7GW
-EOF
+# Add TURN configuration after webrtcICEServers2 line
+# Using metered.ca Open Relay servers (credentials from env)
+cat >> "$MEDIAMTX_CONFIG" << EOF
+
+
 
 echo "TURN servers added to mediamtx config"
 echo ""
