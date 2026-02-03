@@ -92,6 +92,21 @@ const MAX_RECONNECT_DELAY = 5000;
 const PING_INTERVAL = 3000;
 const PONG_TIMEOUT = 10000;
 
+// Audio handling
+let audioContext = null;
+let audioDestination = null; // For playing rover audio
+let audioQueue = []; // Queue for audio chunks
+let isPlayingAudio = false;
+let isRoverAudioMuted = false;
+let mediaStream = null; // For capturing pilot audio
+let mediaRecorder = null;
+let audioChunks = [];
+let isPttActive = false;
+const pttBtn = document.getElementById('pttBtn');
+const muteBtn = document.getElementById('muteBtn');
+const SAMPLE_RATE = 16000;
+const CHANNELS = 1;
+
 function checkConnection() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   
@@ -344,6 +359,9 @@ function connectLocal() {
   
   try {
     ws = new WebSocket(`${proto}://${location.host}/ws`);
+    
+    // Set binary type to arraybuffer for easier handling
+    ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
       statusEl.textContent = "WS: connected";
@@ -397,8 +415,33 @@ function connectLocal() {
       }
     };
     
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
       lastPongTime = Date.now(); // Any message counts as a "pong"
+      
+      // Handle binary audio messages from rover
+      // With binaryType='arraybuffer', binary messages come as ArrayBuffer
+      if (event.data instanceof ArrayBuffer) {
+        const byteLength = event.data.byteLength;
+        if (byteLength > 0) {
+          console.log('Received binary audio:', byteLength, 'bytes');
+          handleRoverAudio(event.data);
+          return;
+        }
+      }
+      
+      // Handle Blob (shouldn't happen with arraybuffer type, but handle it)
+      if (event.data instanceof Blob) {
+        console.log('Received binary audio (Blob):', event.data.size, 'bytes');
+        handleRoverAudio(event.data);
+        return;
+      }
+      
+      // Text messages
+      if (typeof event.data !== 'string') {
+        console.warn('Received non-string, non-binary message:', typeof event.data, event.data);
+        return;
+      }
+      
       const msg = event.data;
       
       if (msg.startsWith("VERSION_MISMATCH:")) {
@@ -1326,6 +1369,10 @@ function updateRoleUI() {
     releaseBtn?.classList.remove('hidden');
     claimBtn?.classList.add('hidden');
     
+    // Enable audio buttons
+    pttBtn?.classList.remove('disabled');
+    muteBtn?.classList.remove('disabled');
+    
     // Show/hide request overlay based on pending request
     if (pendingRequestFrom) {
       requestFromNameEl.textContent = pendingRequestFrom;
@@ -1388,6 +1435,11 @@ function updateRoleUI() {
     joystickHandle?.classList.add('disabled');
     allKnobs.forEach(knob => knob.classList.add('disabled'));
     rescanBtn?.classList.add('disabled');
+    pttBtn?.classList.add('disabled');
+    muteBtn?.classList.add('disabled');
+    
+    // Stop PTT if active
+    stopPtt();
     
     // Force reset all interaction states
     isDragging = false;
@@ -1544,3 +1596,340 @@ function showVersionMismatchModal(serverVersion) {
     e.stopPropagation();
   });
 }
+
+// ===== Audio Handling =====
+
+// Initialize audio context for playback
+async function initAudioPlayback() {
+  try {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: SAMPLE_RATE
+    });
+    audioDestination = audioContext.createGain();
+    audioDestination.gain.value = 1.0; // Full volume
+    audioDestination.connect(audioContext.destination);
+    
+    // Resume context immediately (browsers require user interaction)
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+    
+    // Start the audio playback loop
+    startAudioPlaybackLoop();
+    
+    console.log('Audio playback initialized, state:', audioContext.state, 'sampleRate:', audioContext.sampleRate);
+  } catch (error) {
+    console.error('Failed to initialize audio playback:', error);
+  }
+}
+
+// Continuous audio playback loop using ScriptProcessorNode
+let playbackProcessor = null;
+let playbackBuffer = new Float32Array(0);
+
+function startAudioPlaybackLoop() {
+  if (!audioContext || playbackProcessor) return;
+  
+  try {
+    // Use ScriptProcessorNode for continuous playback
+    const bufferSize = 4096;
+    playbackProcessor = audioContext.createScriptProcessor(bufferSize, 0, CHANNELS);
+    
+    playbackProcessor.onaudioprocess = (event) => {
+      const output = event.outputBuffer.getChannelData(0);
+      const outputLength = output.length;
+      
+      // If muted, output silence
+      if (isRoverAudioMuted) {
+        output.fill(0);
+        return;
+      }
+      
+      // Copy data from playback buffer to output
+      const copyLength = Math.min(outputLength, playbackBuffer.length);
+      
+      if (copyLength > 0) {
+        output.set(playbackBuffer.subarray(0, copyLength));
+        
+        // Remove copied data from buffer
+        playbackBuffer = playbackBuffer.subarray(copyLength);
+      }
+      
+      // Fill remainder with zeros (silence) if buffer is empty
+      if (copyLength < outputLength) {
+        output.fill(0, copyLength);
+      }
+    };
+    
+    playbackProcessor.connect(audioDestination);
+    console.log('Audio playback loop started');
+  } catch (error) {
+    console.error('Failed to start audio playback loop:', error);
+  }
+}
+
+// Handle audio data received from rover (raw PCM 16-bit mono)
+let audioChunkCounter = 0;
+
+async function handleRoverAudio(audioData) {
+  audioChunkCounter++;
+  
+  if (!audioContext || audioContext.state === 'closed') {
+    console.log('Initializing audio playback...');
+    await initAudioPlayback();
+  }
+  
+  if (!audioContext || !playbackProcessor) {
+    if (audioChunkCounter % 100 === 0) { // Log every 100 chunks to avoid spam
+      console.error('Audio context or playback processor not available');
+    }
+    return;
+  }
+  
+  try {
+    // Resume audio context if suspended
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+      if (audioChunkCounter % 50 === 0) {
+        console.log('Resumed suspended audio context');
+      }
+    }
+    
+    // Convert ArrayBuffer/Blob to ArrayBuffer
+    let buffer;
+    if (audioData instanceof Blob) {
+      buffer = await audioData.arrayBuffer();
+    } else if (audioData instanceof ArrayBuffer) {
+      buffer = audioData;
+    } else {
+      console.error('Unknown audio data type:', typeof audioData);
+      return;
+    }
+    
+    if (!buffer || buffer.byteLength === 0) {
+      return; // Skip empty buffers silently
+    }
+    
+    // Raw PCM 16-bit mono - convert to float32
+    const pcmData = new Int16Array(buffer);
+    
+    if (pcmData.length === 0) {
+      return; // Skip empty data silently
+    }
+    
+    // Log periodically for debugging
+    if (audioChunkCounter % 50 === 0) {
+      console.log(`Audio chunk #${audioChunkCounter}: ${pcmData.length} samples, buffer size: ${playbackBuffer.length}`);
+    }
+    
+    // Convert 16-bit PCM to float32 (-1.0 to 1.0)
+    const floatData = new Float32Array(pcmData.length);
+    for (let i = 0; i < pcmData.length; i++) {
+      floatData[i] = Math.max(-1.0, Math.min(1.0, pcmData[i] / 32768.0));
+    }
+    
+    // Append to playback buffer
+    const newBuffer = new Float32Array(playbackBuffer.length + floatData.length);
+    newBuffer.set(playbackBuffer);
+    newBuffer.set(floatData, playbackBuffer.length);
+    playbackBuffer = newBuffer;
+    
+    // Limit buffer size to prevent memory issues (keep ~1 second of audio)
+    const maxBufferSize = SAMPLE_RATE * 1; // 1 second
+    if (playbackBuffer.length > maxBufferSize) {
+      playbackBuffer = playbackBuffer.subarray(playbackBuffer.length - maxBufferSize);
+    }
+    
+  } catch (error) {
+    console.error('Error processing rover audio:', error);
+  }
+}
+
+// Initialize audio capture for push-to-talk
+let captureAudioContext = null;
+let captureSource = null;
+let captureProcessor = null;
+
+async function initAudioCapture() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        sampleRate: SAMPLE_RATE,
+        channelCount: CHANNELS,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+    
+    // Use AudioContext with ScriptProcessorNode for direct PCM access
+    captureAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: SAMPLE_RATE
+    });
+    
+    captureSource = captureAudioContext.createMediaStreamSource(mediaStream);
+    
+    // Use ScriptProcessorNode (deprecated but works) or AudioWorkletNode
+    const bufferSize = 4096;
+    captureProcessor = captureAudioContext.createScriptProcessor(bufferSize, CHANNELS, CHANNELS);
+    
+    captureProcessor.onaudioprocess = (event) => {
+      if (!isPttActive || !isOperator) return;
+      
+      const inputData = event.inputBuffer.getChannelData(0);
+      const pcmData = new Int16Array(inputData.length);
+      
+      // Convert float32 to 16-bit PCM
+      for (let i = 0; i < inputData.length; i++) {
+        const sample = Math.max(-1.0, Math.min(1.0, inputData[i]));
+        pcmData[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      }
+      
+      // Send PCM data as binary
+      if (ws && ws.readyState === WebSocket.OPEN && isOperator) {
+        try {
+          ws.send(pcmData.buffer);
+        } catch (error) {
+          console.error('Error sending audio:', error);
+        }
+      }
+    };
+    
+    captureSource.connect(captureProcessor);
+    captureProcessor.connect(captureAudioContext.destination);
+    
+    console.log('Audio capture initialized');
+    return true;
+  } catch (error) {
+    console.error('Failed to initialize audio capture:', error);
+    if (pttBtn) {
+      pttBtn.classList.add('disabled');
+      pttBtn.title = 'Microphone access denied';
+    }
+    return false;
+  }
+}
+
+// Push-to-talk handlers
+function startPtt() {
+  if (!isOperator || isPttActive || !captureProcessor) return;
+  
+  isPttActive = true;
+  if (pttBtn) {
+    pttBtn.classList.add('active');
+    const icon = pttBtn.querySelector('i');
+    if (icon) {
+      icon.classList.remove('fa-microphone');
+      icon.classList.add('fa-microphone-lines');
+    }
+  }
+  
+  // Resume audio context if needed
+  if (captureAudioContext && captureAudioContext.state === 'suspended') {
+    captureAudioContext.resume();
+  }
+}
+
+function stopPtt() {
+  if (!isPttActive) return;
+  
+  isPttActive = false;
+  if (pttBtn) {
+    pttBtn.classList.remove('active');
+    const icon = pttBtn.querySelector('i');
+    if (icon) {
+      icon.classList.remove('fa-microphone-lines');
+      icon.classList.add('fa-microphone');
+    }
+  }
+}
+
+// Push-to-talk button event handlers
+if (pttBtn) {
+  // Mouse events
+  pttBtn.addEventListener('mousedown', (e) => {
+    if (!isOperator || pttBtn.classList.contains('disabled')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startPtt();
+  });
+  
+  window.addEventListener('mouseup', () => {
+    stopPtt();
+  });
+  
+  // Touch events
+  pttBtn.addEventListener('touchstart', (e) => {
+    if (!isOperator || pttBtn.classList.contains('disabled')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startPtt();
+  }, { passive: false });
+  
+  window.addEventListener('touchend', () => {
+    stopPtt();
+  });
+  
+  // Keyboard shortcut (spacebar)
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && isOperator && !isPttActive && !pttBtn.classList.contains('disabled')) {
+      e.preventDefault();
+      startPtt();
+    }
+  });
+  
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' && isPttActive) {
+      e.preventDefault();
+      stopPtt();
+    }
+  });
+}
+
+// Mute button handler
+function toggleMute(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  
+  isRoverAudioMuted = !isRoverAudioMuted;
+  
+  if (muteBtn) {
+    const icon = muteBtn.querySelector('i');
+    if (isRoverAudioMuted) {
+      muteBtn.classList.add('active');
+      if (icon) {
+        icon.classList.remove('fa-volume-high');
+        icon.classList.add('fa-volume-xmark');
+      }
+      muteBtn.title = 'Unmute rover audio';
+    } else {
+      muteBtn.classList.remove('active');
+      if (icon) {
+        icon.classList.remove('fa-volume-xmark');
+        icon.classList.add('fa-volume-high');
+      }
+      muteBtn.title = 'Mute rover audio';
+    }
+  }
+}
+
+if (muteBtn) {
+  muteBtn.addEventListener('click', toggleMute);
+  muteBtn.addEventListener('touchend', toggleMute, { passive: false });
+}
+
+// Initialize audio on page load
+(async () => {
+  console.log('Initializing audio systems...');
+  await initAudioPlayback();
+  await initAudioCapture();
+  console.log('Audio systems initialized');
+})();
+
+// Also initialize audio playback when user interacts (required by browsers)
+document.addEventListener('click', async () => {
+  if (audioContext && audioContext.state === 'suspended') {
+    await audioContext.resume();
+    console.log('Audio context resumed after user interaction');
+  }
+}, { once: true });

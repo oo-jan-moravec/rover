@@ -1,4 +1,4 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -30,10 +30,7 @@
         padding: 0;
       }
       body {
-        font-family:
-          system-ui,
-          -apple-system,
-          sans-serif;
+        font-family: system-ui, -apple-system, sans-serif;
         background: #0f1419;
         color: #e6edf3;
         height: 100vh;
@@ -381,6 +378,16 @@
         gap: 12px;
         z-index: 10;
       }
+      /* Audio buttons - circular, absolute positioned on left side */
+      .audio-controls {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 10;
+      }
       .light-btn {
         width: 52px;
         height: 52px;
@@ -431,6 +438,59 @@
         cursor: not-allowed;
         pointer-events: none;
       }
+      /* Audio buttons - same style as light buttons */
+      .audio-btn {
+        width: 52px;
+        height: 52px;
+        border-radius: 50%;
+        background: #21262d;
+        border: 2px solid #30363d;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: #8b949e;
+        cursor: pointer;
+        transition: all 0.2s;
+        position: relative;
+      }
+      .audio-btn:hover {
+        background: #30363d;
+        border-color: #444c56;
+      }
+      .audio-btn:active {
+        transform: scale(0.95);
+      }
+      .audio-btn.ptt.active {
+        background: rgba(248, 81, 73, 0.2);
+        border-color: #f85149;
+        color: #f85149;
+        box-shadow: 0 0 12px rgba(248, 81, 73, 0.4);
+        animation: pulse-ptt 1s ease-in-out infinite;
+      }
+      @keyframes pulse-ptt {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.7;
+        }
+      }
+      .audio-btn.mute.active {
+        background: rgba(248, 81, 73, 0.2);
+        border-color: #f85149;
+        color: #f85149;
+        box-shadow: 0 0 12px rgba(248, 81, 73, 0.4);
+      }
+      .audio-btn i {
+        font-size: 22px;
+      }
+      .audio-btn.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
       .motor-values {
         display: flex;
         gap: 24px;
@@ -475,8 +535,7 @@
         border-radius: 50%;
         background: linear-gradient(145deg, #1f2428 0%, #161b22 100%);
         border: 2px solid #30363d;
-        box-shadow:
-          inset 0 2px 4px rgba(0, 0, 0, 0.5),
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5),
           0 2px 8px rgba(0, 0, 0, 0.3);
         position: relative;
       }
@@ -1087,11 +1146,18 @@
           right: 8px;
           gap: 8px;
         }
-        .light-btn {
+        .audio-controls {
+          top: 8px;
+          left: 8px;
+          gap: 8px;
+        }
+        .light-btn,
+        .audio-btn {
           width: 44px;
           height: 44px;
         }
-        .light-btn i {
+        .light-btn i,
+        .audio-btn i {
           font-size: 18px;
         }
         .light-btn-label {
@@ -1390,7 +1456,25 @@
       </div>
 
       <div class="controls-section joystick-section">
-        <!-- Light controls -->
+        <!-- Audio controls - left side -->
+        <div class="audio-controls">
+          <div
+            class="audio-btn ptt"
+            id="pttBtn"
+            title="Push to Talk (hold to speak)"
+          >
+            <i class="fa-light fa-microphone"></i>
+          </div>
+          <div
+            class="audio-btn mute"
+            id="muteBtn"
+            title="Mute rover audio"
+          >
+            <i class="fa-light fa-volume-high"></i>
+          </div>
+        </div>
+
+        <!-- Light controls - right side -->
         <div class="light-controls">
           <div
             class="light-btn"
@@ -1400,7 +1484,11 @@
             <i class="fa-light fa-lightbulb"></i>
             <span class="light-btn-label">LED</span>
           </div>
-          <div class="light-btn ir" id="irLedBtn" title="Toggle IR LED">
+          <div
+            class="light-btn ir"
+            id="irLedBtn"
+            title="Toggle IR LED"
+          >
             <i class="fa-light fa-eye-slash"></i>
             <span class="light-btn-label">IR</span>
           </div>

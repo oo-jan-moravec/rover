@@ -16,10 +16,13 @@ builder.Services.AddSingleton<GpioController>();
 builder.Services.AddSingleton<WifiState>();
 builder.Services.AddSingleton<SafetyStateMachine>();
 builder.Services.AddSingleton<WifiMonitor>();
+builder.Services.AddSingleton<AudioCaptureService>();
+builder.Services.AddSingleton<AudioPlaybackService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WifiMonitor>());
 builder.Services.AddHostedService<SerialPump>();
 builder.Services.AddHostedService<DiagnosticsPump>();
 builder.Services.AddHostedService<WifiRecoveryWatchdog>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AudioCaptureService>());
 builder.Services.AddHttpClient();
 var app = builder.Build();
 
@@ -34,7 +37,7 @@ if (string.IsNullOrWhiteSpace(roverPassword))
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value?.ToLowerInvariant();
-    
+
     // Allow access to login page, login API, and static assets needed for login
     if (path == "/login.html" || path == "/api/login" || (path != null && path.StartsWith("/favicon.ico")))
     {
@@ -62,20 +65,20 @@ app.MapPost("/api/login", async (HttpContext context) =>
     using var reader = new StreamReader(context.Request.Body);
     var body = await reader.ReadToEndAsync();
     var data = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
-    
+
     var expectedPassword = roverPassword;
     if (data != null && data.TryGetValue("password", out var password) && password == expectedPassword)
     {
-        context.Response.Cookies.Append("RoverAuth", expectedPassword, new CookieOptions 
-        { 
-            HttpOnly = true, 
+        context.Response.Cookies.Append("RoverAuth", expectedPassword, new CookieOptions
+        {
+            HttpOnly = true,
             Secure = false, // Set to true if using HTTPS
             SameSite = SameSiteMode.Strict,
             Expires = DateTimeOffset.UtcNow.AddDays(7)
         });
         return Results.Ok();
     }
-    
+
     return Results.Unauthorized();
 });
 
@@ -94,7 +97,7 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.UseWebSockets();
 
-app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, OperatorManager opManager, GpioController gpio, SafetyStateMachine safetyMachine) =>
+app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, OperatorManager opManager, GpioController gpio, SafetyStateMachine safetyMachine, AudioPlaybackService audioPlayback) =>
 {
     if (!ctx.WebSockets.IsWebSocketRequest)
     {
@@ -171,6 +174,19 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
         {
             var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
             if (result.MessageType == WebSocketMessageType.Close) break;
+
+            // Handle binary messages (audio from pilot)
+            if (result.MessageType == WebSocketMessageType.Binary)
+            {
+                // Only accept audio from operator
+                if (opManager.IsOperator(clientId))
+                {
+                    var audioData = new byte[result.Count];
+                    Array.Copy(buffer, audioData, result.Count);
+                    audioPlayback.PlayAudioChunk(audioData);
+                }
+                continue;
+            }
 
             var msg = Encoding.UTF8.GetString(buffer, 0, result.Count).Trim();
 
@@ -323,8 +339,8 @@ app.Map("/cam/{*path}", async (HttpContext context, IHttpClientFactory clientFac
     var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUrl);
 
     // Forward the request body (important for WHEP/WebRTC POST requests)
-    if (HttpMethods.IsPost(context.Request.Method) || 
-        HttpMethods.IsPut(context.Request.Method) || 
+    if (HttpMethods.IsPost(context.Request.Method) ||
+        HttpMethods.IsPut(context.Request.Method) ||
         HttpMethods.IsPatch(context.Request.Method))
     {
         var memoryStream = new MemoryStream();
@@ -332,7 +348,7 @@ app.Map("/cam/{*path}", async (HttpContext context, IHttpClientFactory clientFac
         memoryStream.Position = 0;
         request.Content = new StreamContent(memoryStream);
     }
-    
+
     foreach (var header in context.Request.Headers)
     {
         if (header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
@@ -351,7 +367,7 @@ app.Map("/cam/{*path}", async (HttpContext context, IHttpClientFactory clientFac
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
         Console.WriteLine($"Proxy: {context.Request.Method} {path} -> {response.StatusCode}");
         context.Response.StatusCode = (int)response.StatusCode;
-        
+
         foreach (var header in response.Headers)
         {
             if (hopByHopHeaders.Any(h => h.Equals(header.Key, StringComparison.OrdinalIgnoreCase))) continue;
@@ -405,7 +421,7 @@ sealed class WifiRecoveryWatchdog : BackgroundService
                 if (idleTime > Timeout)
                 {
                     _logger.LogWarning("Operator present but no command received for {IdleTime}s. Triggering Wi-Fi recovery...", (int)idleTime.TotalSeconds);
-                    
+
                     // Reset the timer so we don't spam restarts
                     _state.Touch();
 
@@ -441,7 +457,7 @@ sealed class WifiRecoveryWatchdog : BackgroundService
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            
+
             using (var reassociateProcess = Process.Start(reassociatePsi))
             {
                 if (reassociateProcess != null)
@@ -751,6 +767,50 @@ sealed class WebSocketManager
     }
 
     public IEnumerable<Guid> GetAllClientIds() => _clients.Keys;
+
+    public Task BroadcastAudioAsync(byte[] audioData)
+    {
+        if (_clients.IsEmpty) return Task.CompletedTask;
+
+        var deadClients = new List<Guid>();
+
+        foreach (var (id, ws) in _clients)
+        {
+            if (ws.State != WebSocketState.Open)
+            {
+                deadClients.Add(id);
+                continue;
+            }
+
+            try
+            {
+                // Fire and forget - don't block on slow clients
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await ws.SendAsync(audioData, WebSocketMessageType.Binary, true, CancellationToken.None);
+                    }
+                    catch
+                    {
+                        // Client disconnected, will be cleaned up
+                    }
+                });
+            }
+            catch
+            {
+                deadClients.Add(id);
+            }
+        }
+
+        // Clean up dead clients
+        foreach (var id in deadClients)
+        {
+            RemoveClient(id);
+        }
+
+        return Task.CompletedTask;
+    }
 }
 
 sealed class RoverState
@@ -1116,13 +1176,13 @@ sealed class GpioController : IDisposable
         try
         {
             _controller = new System.Device.Gpio.GpioController();
-            
+
             _controller.OpenPin(IrLedPin, PinMode.Output);
             _controller.Write(IrLedPin, PinValue.Low);
-            
+
             _controller.OpenPin(HeadlightPin, PinMode.Output);
             _controller.Write(HeadlightPin, PinValue.Low);
-            
+
             _gpioAvailable = true;
             _logger?.LogInformation($"GPIO initialized successfully. IR (Pin {IrLedPin}) and Headlight (Pin {HeadlightPin}) set to output.");
         }
@@ -1860,6 +1920,248 @@ sealed class DiagnosticsPump : BackgroundService
         }
         catch { }
         return -1;
+    }
+}
+
+// ===== Audio Services =====
+
+/// <summary>
+/// Captures audio from USB soundcard microphone and broadcasts to all WebSocket clients
+/// </summary>
+sealed class AudioCaptureService : BackgroundService
+{
+    private readonly WebSocketManager _wsManager;
+    private readonly ILogger<AudioCaptureService>? _logger;
+    private Process? _arecordProcess;
+    private const string AudioDevice = "hw:1,0"; // USB soundcard card 1, device 0
+    private const int SampleRate = 16000; // 16kHz for lower bandwidth
+    private const int CaptureChannels = 2; // Record in stereo (most USB soundcards require this)
+    private const int OutputChannels = 1; // Convert to mono for transmission
+    private const int ChunkSize = 6400; // ~200ms chunks at 16kHz stereo 16-bit (3200 samples * 2 channels * 2 bytes)
+
+    public AudioCaptureService(WebSocketManager wsManager, ILogger<AudioCaptureService>? logger = null)
+    {
+        _wsManager = wsManager;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger?.LogInformation("AudioCaptureService started");
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                // Start arecord process to capture audio
+                // Use stereo capture (most USB soundcards require this)
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "/usr/bin/arecord",
+                    Arguments = $"-D {AudioDevice} -f S16_LE -r {SampleRate} -c {CaptureChannels} -t raw",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                _arecordProcess = Process.Start(psi);
+                if (_arecordProcess == null)
+                {
+                    _logger?.LogWarning("Failed to start arecord, retrying in 5 seconds...");
+                    await Task.Delay(5000, stoppingToken);
+                    continue;
+                }
+
+                _logger?.LogInformation($"Audio capture started on {AudioDevice}");
+
+                // Read audio chunks and broadcast to clients
+                var audioBuffer = new byte[ChunkSize];
+                using var stream = _arecordProcess.StandardOutput.BaseStream;
+                var chunkCounter = 0;
+
+                while (!stoppingToken.IsCancellationRequested && !_arecordProcess.HasExited)
+                {
+                    var bytesRead = await stream.ReadAsync(audioBuffer, 0, ChunkSize, stoppingToken);
+                    if (bytesRead > 0)
+                    {
+                        // Convert stereo to mono by averaging left and right channels
+                        // Input: stereo 16-bit PCM (interleaved: L R L R ...)
+                        // Output: mono 16-bit PCM
+                        var stereoSamples = bytesRead / (CaptureChannels * 2); // 2 bytes per sample, 2 channels
+                        var monoChunk = new byte[stereoSamples * 2]; // 2 bytes per mono sample
+
+                        // Convert interleaved stereo to mono
+                        for (int i = 0; i < stereoSamples; i++)
+                        {
+                            // Read left and right channel samples (16-bit = 2 bytes each)
+                            int leftIdx = i * CaptureChannels * 2;
+                            int rightIdx = leftIdx + 2;
+
+                            short left = BitConverter.ToInt16(audioBuffer, leftIdx);
+                            short right = BitConverter.ToInt16(audioBuffer, rightIdx);
+
+                            // Average the channels
+                            short mono = (short)((left + right) / 2);
+
+                            // Write mono sample
+                            int monoIdx = i * 2;
+                            BitConverter.GetBytes(mono).CopyTo(monoChunk, monoIdx);
+                        }
+
+                        chunkCounter++;
+                        if (chunkCounter % 50 == 0) // Log every 50 chunks (~10 seconds)
+                        {
+                            _logger?.LogInformation($"Broadcasting audio chunk {chunkCounter}: {bytesRead} bytes stereo -> {monoChunk.Length} bytes mono to {_wsManager.GetAllClientIds().Count()} clients");
+                        }
+
+                        await _wsManager.BroadcastAudioAsync(monoChunk);
+                    }
+                    else if (bytesRead == 0)
+                    {
+                        // End of stream
+                        _logger?.LogWarning("arecord stream ended (bytesRead=0)");
+                        break;
+                    }
+                }
+
+                if (_arecordProcess.HasExited)
+                {
+                    var error = await _arecordProcess.StandardError.ReadToEndAsync();
+                    _logger?.LogWarning($"arecord exited with code {_arecordProcess.ExitCode}: {error}");
+                    await Task.Delay(2000, stoppingToken); // Wait before retry
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error in audio capture, retrying in 5 seconds...");
+                await Task.Delay(5000, stoppingToken);
+            }
+            finally
+            {
+                try
+                {
+                    _arecordProcess?.Kill();
+                    _arecordProcess?.Dispose();
+                    _arecordProcess = null;
+                }
+                catch { }
+            }
+        }
+    }
+
+    public override void Dispose()
+    {
+        try
+        {
+            _arecordProcess?.Kill();
+            _arecordProcess?.Dispose();
+        }
+        catch { }
+        base.Dispose();
+    }
+}
+
+/// <summary>
+/// Plays audio chunks received from pilot to rover speaker
+/// </summary>
+sealed class AudioPlaybackService
+{
+    private readonly ILogger<AudioPlaybackService>? _logger;
+    private Process? _aplayProcess;
+    private readonly object _playbackLock = new();
+    private const string AudioDevice = "hw:1,0"; // USB soundcard card 1, device 0
+    private const int SampleRate = 16000; // 16kHz
+    private const int Channels = 1; // Mono
+    private readonly Queue<byte[]> _audioQueue = new();
+    private bool _isPlaying = false;
+
+    public AudioPlaybackService(ILogger<AudioPlaybackService>? logger = null)
+    {
+        _logger = logger;
+    }
+
+    public void PlayAudioChunk(byte[] audioData)
+    {
+        lock (_playbackLock)
+        {
+            _audioQueue.Enqueue(audioData);
+
+            // Start playback if not already running
+            if (!_isPlaying)
+            {
+                _isPlaying = true;
+                _ = Task.Run(PlaybackLoop);
+            }
+        }
+    }
+
+    private async Task PlaybackLoop()
+    {
+        while (true)
+        {
+            byte[]? chunk;
+            lock (_playbackLock)
+            {
+                if (_audioQueue.Count == 0)
+                {
+                    _isPlaying = false;
+                    return;
+                }
+                chunk = _audioQueue.Dequeue();
+            }
+
+            try
+            {
+                // Start aplay process if not running
+                if (_aplayProcess == null || _aplayProcess.HasExited)
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = "/usr/bin/aplay",
+                        Arguments = $"-D {AudioDevice} -f S16_LE -r {SampleRate} -c {Channels} -t raw",
+                        RedirectStandardInput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    _aplayProcess = Process.Start(psi);
+                    if (_aplayProcess == null)
+                    {
+                        _logger?.LogWarning("Failed to start aplay");
+                        await Task.Delay(100);
+                        continue;
+                    }
+                }
+
+                // Write audio chunk to aplay stdin
+                await _aplayProcess.StandardInput.BaseStream.WriteAsync(chunk, 0, chunk.Length);
+                await _aplayProcess.StandardInput.BaseStream.FlushAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error playing audio chunk");
+                try
+                {
+                    _aplayProcess?.Kill();
+                    _aplayProcess?.Dispose();
+                    _aplayProcess = null;
+                }
+                catch { }
+                await Task.Delay(100);
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            _aplayProcess?.Kill();
+            _aplayProcess?.Dispose();
+        }
+        catch { }
     }
 }
 
