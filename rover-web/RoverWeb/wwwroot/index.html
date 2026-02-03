@@ -330,8 +330,8 @@
       }
       .joystick {
         position: relative;
-        width: 280px;
-        height: 280px;
+        width: 250px;
+        height: 250px;
         border-radius: 50%;
         background: #0d1117;
         border: 2px solid #30363d;
@@ -482,6 +482,24 @@
         border-color: #f85149;
         color: #f85149;
         box-shadow: 0 0 12px rgba(248, 81, 73, 0.4);
+      }
+      .audio-btn.horn {
+        background: #21262d;
+        border-color: #30363d;
+        color: #8b949e;
+      }
+      .audio-btn.horn:hover {
+        background: #30363d;
+        border-color: #444c56;
+      }
+      .audio-btn.horn.active {
+        background: rgba(88, 166, 255, 0.2);
+        border-color: #58a6ff;
+        color: #58a6ff;
+        box-shadow: 0 0 12px rgba(88, 166, 255, 0.4);
+      }
+      .audio-btn.horn:active {
+        transform: scale(0.95);
       }
       .audio-btn i {
         font-size: 22px;
@@ -1471,6 +1489,13 @@
             title="Mute rover audio"
           >
             <i class="fa-light fa-volume-high"></i>
+          </div>
+          <div
+            class="audio-btn horn"
+            id="hornBtn"
+            title="Sound horn (1000Hz)"
+          >
+            <i class="fa-light fa-bullhorn"></i>
           </div>
         </div>
 

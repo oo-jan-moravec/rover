@@ -104,6 +104,7 @@ let audioChunks = [];
 let isPttActive = false;
 const pttBtn = document.getElementById('pttBtn');
 const muteBtn = document.getElementById('muteBtn');
+const hornBtn = document.getElementById('hornBtn');
 const SAMPLE_RATE = 16000;
 const CHANNELS = 1;
 
@@ -1372,6 +1373,7 @@ function updateRoleUI() {
     // Enable audio buttons
     pttBtn?.classList.remove('disabled');
     muteBtn?.classList.remove('disabled');
+    hornBtn?.classList.remove('disabled');
     
     // Show/hide request overlay based on pending request
     if (pendingRequestFrom) {
@@ -1437,6 +1439,7 @@ function updateRoleUI() {
     rescanBtn?.classList.add('disabled');
     pttBtn?.classList.add('disabled');
     muteBtn?.classList.add('disabled');
+    hornBtn?.classList.add('disabled');
     
     // Stop PTT if active
     stopPtt();
@@ -1965,6 +1968,49 @@ function toggleMute(e) {
 if (muteBtn) {
   muteBtn.addEventListener('click', toggleMute);
   muteBtn.addEventListener('touchend', toggleMute, { passive: false });
+}
+
+// Horn button handlers (press and hold, like PTT)
+function startHorn(e) {
+  if (!isOperator || hornBtn.classList.contains('disabled')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  
+  // Send horn start command to rover
+  send('HORN_START');
+  console.log('Horn started');
+  
+  if (hornBtn) {
+    hornBtn.classList.add('active');
+  }
+}
+
+function stopHorn() {
+  // Send horn stop command to rover
+  send('HORN_STOP');
+  console.log('Horn stopped');
+  
+  if (hornBtn) {
+    hornBtn.classList.remove('active');
+  }
+}
+
+if (hornBtn) {
+  // Mouse events
+  hornBtn.addEventListener('mousedown', startHorn);
+  window.addEventListener('mouseup', () => {
+    if (hornBtn.classList.contains('active')) {
+      stopHorn();
+    }
+  });
+  
+  // Touch events
+  hornBtn.addEventListener('touchstart', startHorn, { passive: false });
+  window.addEventListener('touchend', () => {
+    if (hornBtn.classList.contains('active')) {
+      stopHorn();
+    }
+  });
 }
 
 // Initialize audio on page load

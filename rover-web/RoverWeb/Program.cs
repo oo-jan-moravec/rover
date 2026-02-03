@@ -309,6 +309,30 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                         }
                     });
                 }
+                else if (msg == "HORN_START")
+                {
+                    // Start continuous horn sound (1000Hz sine wave)
+                    try
+                    {
+                        audioPlayback.StartHorn();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error starting horn: {ex.Message}");
+                    }
+                }
+                else if (msg == "HORN_STOP")
+                {
+                    // Stop horn sound
+                    try
+                    {
+                        audioPlayback.StopHorn();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error stopping horn: {ex.Message}");
+                    }
+                }
             }
         }
     }
@@ -2082,6 +2106,9 @@ sealed class AudioPlaybackService
     private const int InputChannels = 1; // Input is mono
     private readonly Queue<byte[]> _audioQueue = new();
     private bool _isPlaying = false;
+    private bool _hornActive = false;
+    private CancellationTokenSource? _hornCancellation = null;
+    private readonly object _hornLock = new();
 
     public AudioPlaybackService(ILogger<AudioPlaybackService>? logger = null)
     {
@@ -2286,10 +2313,82 @@ sealed class AudioPlaybackService
         }
     }
 
+    public void StartHorn()
+    {
+        lock (_hornLock)
+        {
+            if (_hornActive) return; // Already playing
+
+            _hornActive = true;
+            _hornCancellation = new CancellationTokenSource();
+            _logger?.LogInformation("Horn started - playing 1000Hz sine wave");
+
+            // Start continuous horn generation in background
+            _ = Task.Run(() => HornGenerationLoop(_hornCancellation.Token));
+        }
+    }
+
+    public void StopHorn()
+    {
+        lock (_hornLock)
+        {
+            if (!_hornActive) return;
+
+            _hornActive = false;
+            _hornCancellation?.Cancel();
+            _hornCancellation?.Dispose();
+            _hornCancellation = null;
+            _logger?.LogInformation("Horn stopped");
+        }
+    }
+
+    private async Task HornGenerationLoop(CancellationToken cancellationToken)
+    {
+        int frequencyHz = 1000;
+        int chunkDurationMs = 100; // Generate 100ms chunks
+        int samplesPerChunk = SampleRate * chunkDurationMs / 1000;
+        double twoPiFreq = 2.0 * Math.PI * frequencyHz;
+
+        int sampleCounter = 0;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            // Generate one chunk of horn audio
+            var hornChunk = new byte[samplesPerChunk * PlaybackChannels * 2]; // 2 bytes per 16-bit sample
+
+            for (int i = 0; i < samplesPerChunk; i++)
+            {
+                // Generate sine wave sample
+                double time = (double)(sampleCounter + i) / SampleRate;
+                double sample = Math.Sin(twoPiFreq * time);
+
+                // Convert to 16-bit PCM
+                short pcmSample = (short)(sample * 32767);
+                byte[] sampleBytes = BitConverter.GetBytes(pcmSample);
+
+                // Write to both left and right channels (stereo)
+                int leftIdx = i * PlaybackChannels * 2;
+                int rightIdx = leftIdx + 2;
+
+                sampleBytes.CopyTo(hornChunk, leftIdx);  // Left channel
+                sampleBytes.CopyTo(hornChunk, rightIdx); // Right channel
+            }
+
+            sampleCounter += samplesPerChunk;
+
+            // Queue the horn audio chunk
+            PlayAudioChunk(hornChunk);
+
+            // Wait before generating next chunk
+            await Task.Delay(chunkDurationMs, cancellationToken);
+        }
+    }
+
     public void Dispose()
     {
         try
         {
+            StopHorn();
             _aplayProcess?.Kill();
             _aplayProcess?.Dispose();
         }
