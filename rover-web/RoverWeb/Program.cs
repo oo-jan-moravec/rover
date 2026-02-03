@@ -182,8 +182,14 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                 if (opManager.IsOperator(clientId))
                 {
                     var audioData = new byte[result.Count];
-                    Array.Copy(buffer, audioData, result.Count);
+                    Array.Copy(buffer, 0, audioData, 0, result.Count);
+                    Console.WriteLine($"Received audio chunk from operator: {result.Count} bytes");
                     audioPlayback.PlayAudioChunk(audioData);
+                }
+                else
+                {
+                    // Log if non-operator tries to send audio
+                    Console.WriteLine($"Non-operator {clientId} attempted to send audio");
                 }
                 continue;
             }
@@ -2072,7 +2078,8 @@ sealed class AudioPlaybackService
     private readonly object _playbackLock = new();
     private const string AudioDevice = "hw:1,0"; // USB soundcard card 1, device 0
     private const int SampleRate = 16000; // 16kHz
-    private const int Channels = 1; // Mono
+    private const int PlaybackChannels = 2; // Playback in stereo (USB soundcard requires this)
+    private const int InputChannels = 1; // Input is mono
     private readonly Queue<byte[]> _audioQueue = new();
     private bool _isPlaying = false;
 
@@ -2086,29 +2093,73 @@ sealed class AudioPlaybackService
         lock (_playbackLock)
         {
             _audioQueue.Enqueue(audioData);
+            var queueSize = _audioQueue.Count;
+            _logger?.LogInformation($"Queued audio chunk: {audioData.Length} bytes, queue size: {queueSize}");
 
             // Start playback if not already running
             if (!_isPlaying)
             {
                 _isPlaying = true;
-                _ = Task.Run(PlaybackLoop);
+                _logger?.LogInformation("Starting audio playback loop - queue has {QueueSize} chunks", queueSize);
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await PlaybackLoop();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "Playback loop crashed");
+                        lock (_playbackLock)
+                        {
+                            _isPlaying = false;
+                        }
+                    }
+                });
             }
         }
     }
 
     private async Task PlaybackLoop()
     {
+        var chunkCounter = 0;
+        _logger?.LogInformation("PlaybackLoop started");
+
         while (true)
         {
-            byte[]? chunk;
+            byte[]? chunk = null;
+            int queueSize = 0;
+
             lock (_playbackLock)
             {
+                queueSize = _audioQueue.Count;
                 if (_audioQueue.Count == 0)
                 {
                     _isPlaying = false;
-                    return;
+                    _logger?.LogInformation("PlaybackLoop: queue empty, stopping");
                 }
-                chunk = _audioQueue.Dequeue();
+                else
+                {
+                    chunk = _audioQueue.Dequeue();
+                }
+            }
+
+            // If no chunk, wait a bit and check again
+            if (chunk == null)
+            {
+                await Task.Delay(500);
+
+                // Check again after delay
+                lock (_playbackLock)
+                {
+                    if (_audioQueue.Count == 0)
+                    {
+                        return;
+                    }
+                    chunk = _audioQueue.Dequeue();
+                }
+
+                if (chunk == null) continue;
             }
 
             try
@@ -2119,9 +2170,10 @@ sealed class AudioPlaybackService
                     var psi = new ProcessStartInfo
                     {
                         FileName = "/usr/bin/aplay",
-                        Arguments = $"-D {AudioDevice} -f S16_LE -r {SampleRate} -c {Channels} -t raw",
+                        Arguments = $"-D {AudioDevice} -f S16_LE -r {SampleRate} -c {PlaybackChannels} -t raw",
                         RedirectStandardInput = true,
                         RedirectStandardError = true,
+                        RedirectStandardOutput = true,
                         UseShellExecute = false,
                         CreateNoWindow = true
                     };
@@ -2133,15 +2185,95 @@ sealed class AudioPlaybackService
                         await Task.Delay(100);
                         continue;
                     }
+
+                    _logger?.LogInformation($"aplay started for audio playback (chunk #{chunkCounter}), PID: {_aplayProcess.Id}");
+
+                    // Read stderr in background to catch any errors
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            // Read stderr line by line
+                            while (!_aplayProcess.HasExited)
+                            {
+                                var line = await _aplayProcess.StandardError.ReadLineAsync();
+                                if (line != null)
+                                {
+                                    _logger?.LogWarning($"aplay stderr: {line}");
+                                }
+                                else
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.LogError(ex, "Error reading aplay stderr");
+                        }
+                    });
                 }
 
-                // Write audio chunk to aplay stdin
-                await _aplayProcess.StandardInput.BaseStream.WriteAsync(chunk, 0, chunk.Length);
-                await _aplayProcess.StandardInput.BaseStream.FlushAsync();
+                // Convert mono to stereo by duplicating the channel
+                // Input: mono 16-bit PCM (chunk.Length bytes = chunk.Length/2 samples)
+                // Output: stereo 16-bit PCM (interleaved: L R L R ...)
+                var monoSamples = chunk.Length / 2; // 2 bytes per sample
+                var stereoChunk = new byte[chunk.Length * PlaybackChannels]; // Double the size for stereo
+
+                // Convert using BitConverter (safer, no unsafe code needed)
+                for (int i = 0; i < monoSamples; i++)
+                {
+                    // Read mono sample (16-bit = 2 bytes)
+                    int monoIdx = i * 2;
+                    short monoSample = BitConverter.ToInt16(chunk, monoIdx);
+
+                    // Write to both left and right channels
+                    int stereoIdx = i * PlaybackChannels * 2;
+                    BitConverter.GetBytes(monoSample).CopyTo(stereoChunk, stereoIdx);     // Left
+                    BitConverter.GetBytes(monoSample).CopyTo(stereoChunk, stereoIdx + 2); // Right
+                }
+
+                // Write stereo audio chunk to aplay stdin
+                if (_aplayProcess != null && !_aplayProcess.HasExited)
+                {
+                    try
+                    {
+                        await _aplayProcess.StandardInput.BaseStream.WriteAsync(stereoChunk, 0, stereoChunk.Length);
+                        await _aplayProcess.StandardInput.BaseStream.FlushAsync();
+                        if (chunkCounter <= 5 || chunkCounter % 50 == 0)
+                        {
+                            _logger?.LogInformation($"Wrote {stereoChunk.Length} bytes (mono {chunk.Length} -> stereo) to aplay stdin (chunk #{chunkCounter})");
+                        }
+                    }
+                    catch (Exception writeEx)
+                    {
+                        _logger?.LogError(writeEx, $"Error writing to aplay stdin: {writeEx.Message}");
+                        // Kill and restart aplay
+                        try
+                        {
+                            _aplayProcess?.Kill();
+                            _aplayProcess?.Dispose();
+                            _aplayProcess = null;
+                        }
+                        catch { }
+                    }
+                }
+                else
+                {
+                    _logger?.LogWarning("aplay process is null or has exited, will restart");
+                    _aplayProcess = null;
+                    continue;
+                }
+
+                chunkCounter++;
+                if (chunkCounter <= 5 || chunkCounter % 50 == 0)
+                {
+                    _logger?.LogInformation($"Played {chunkCounter} audio chunks ({chunk.Length} bytes each), queue size: {_audioQueue.Count}, aplay running: {_aplayProcess != null && !_aplayProcess.HasExited}");
+                }
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Error playing audio chunk");
+                _logger?.LogError(ex, $"Error playing audio chunk #{chunkCounter}");
                 try
                 {
                     _aplayProcess?.Kill();

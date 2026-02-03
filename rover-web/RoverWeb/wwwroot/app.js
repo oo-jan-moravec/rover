@@ -1749,6 +1749,7 @@ async function handleRoverAudio(audioData) {
 let captureAudioContext = null;
 let captureSource = null;
 let captureProcessor = null;
+let audioSendCounter = 0;
 
 async function initAudioCapture() {
   try {
@@ -1774,7 +1775,13 @@ async function initAudioCapture() {
     captureProcessor = captureAudioContext.createScriptProcessor(bufferSize, CHANNELS, CHANNELS);
     
     captureProcessor.onaudioprocess = (event) => {
-      if (!isPttActive || !isOperator) return;
+      if (!isPttActive || !isOperator) {
+        if (audioSendCounter === 0) {
+          // Log once why we're not sending
+          console.log('Audio processor active but not sending:', { isPttActive, isOperator, wsReady: ws?.readyState });
+        }
+        return;
+      }
       
       const inputData = event.inputBuffer.getChannelData(0);
       const pcmData = new Int16Array(inputData.length);
@@ -1782,23 +1789,44 @@ async function initAudioCapture() {
       // Convert float32 to 16-bit PCM
       for (let i = 0; i < inputData.length; i++) {
         const sample = Math.max(-1.0, Math.min(1.0, inputData[i]));
-        pcmData[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        // Convert to 16-bit signed integer: -32768 to 32767
+        pcmData[i] = Math.max(-32768, Math.min(32767, Math.round(sample * 32768)));
       }
+      
+      // Check if there's actual audio (not silence)
+      const maxSample = Math.max(...Array.from(pcmData).map(Math.abs));
+      const hasAudio = maxSample > 100; // Threshold for detecting audio
       
       // Send PCM data as binary
       if (ws && ws.readyState === WebSocket.OPEN && isOperator) {
         try {
+          // Send the ArrayBuffer directly (pcmData.buffer is the underlying ArrayBuffer)
           ws.send(pcmData.buffer);
+          audioSendCounter++;
+          if (audioSendCounter <= 5 || audioSendCounter % 50 === 0 || (hasAudio && audioSendCounter % 10 === 0)) {
+            console.log(`Sent audio chunk #${audioSendCounter}: ${pcmData.length} samples, ${pcmData.buffer.byteLength} bytes, maxSample: ${maxSample}, hasAudio: ${hasAudio}`);
+          }
         } catch (error) {
           console.error('Error sending audio:', error);
+        }
+      } else {
+        if (audioSendCounter === 0 || audioSendCounter <= 3) {
+          console.warn('Cannot send audio:', { hasWs: !!ws, wsReady: ws?.readyState, isOperator, isPttActive });
         }
       }
     };
     
+    // Connect source to processor - processor needs to be in the audio graph to work
     captureSource.connect(captureProcessor);
-    captureProcessor.connect(captureAudioContext.destination);
+    // Connect processor to a dummy destination to keep the audio graph active
+    // (ScriptProcessorNode needs to be connected to work, but we'll mute the output)
+    const dummyGain = captureAudioContext.createGain();
+    dummyGain.gain.value = 0; // Mute it
+    dummyGain.connect(captureAudioContext.destination);
+    captureProcessor.connect(dummyGain);
     
-    console.log('Audio capture initialized');
+    console.log('Audio capture initialized, sampleRate:', captureAudioContext.sampleRate, 'bufferSize:', bufferSize);
+    console.log('Audio graph: source -> processor -> dummyGain (muted) -> destination');
     return true;
   } catch (error) {
     console.error('Failed to initialize audio capture:', error);
@@ -1812,9 +1840,15 @@ async function initAudioCapture() {
 
 // Push-to-talk handlers
 function startPtt() {
-  if (!isOperator || isPttActive || !captureProcessor) return;
+  if (!isOperator || isPttActive || !captureProcessor) {
+    console.log('PTT start blocked:', { isOperator, isPttActive, hasProcessor: !!captureProcessor });
+    return;
+  }
   
   isPttActive = true;
+  audioSendCounter = 0; // Reset counter
+  console.log('PTT started, ready to capture audio');
+  
   if (pttBtn) {
     pttBtn.classList.add('active');
     const icon = pttBtn.querySelector('i');
@@ -1825,8 +1859,21 @@ function startPtt() {
   }
   
   // Resume audio context if needed
-  if (captureAudioContext && captureAudioContext.state === 'suspended') {
-    captureAudioContext.resume();
+  if (captureAudioContext) {
+    if (captureAudioContext.state === 'suspended') {
+      captureAudioContext.resume().then(() => {
+        console.log('Audio capture context resumed, state:', captureAudioContext.state);
+      });
+    }
+    // Log current state for debugging
+    console.log('PTT active state:', {
+      isPttActive,
+      isOperator,
+      hasProcessor: !!captureProcessor,
+      hasSource: !!captureSource,
+      wsReady: ws?.readyState,
+      contextState: captureAudioContext?.state
+    });
   }
 }
 
@@ -1834,6 +1881,8 @@ function stopPtt() {
   if (!isPttActive) return;
   
   isPttActive = false;
+  console.log('PTT stopped');
+  
   if (pttBtn) {
     pttBtn.classList.remove('active');
     const icon = pttBtn.querySelector('i');
