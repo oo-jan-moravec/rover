@@ -2109,10 +2109,70 @@ sealed class AudioPlaybackService
     private bool _hornActive = false;
     private CancellationTokenSource? _hornCancellation = null;
     private readonly object _hornLock = new();
+    private byte[]? _hornAudioData = null;
+    private readonly object _hornDataLock = new();
 
     public AudioPlaybackService(ILogger<AudioPlaybackService>? logger = null)
     {
         _logger = logger;
+        // Load horn audio file on startup
+        _ = Task.Run(LoadHornAudioAsync);
+    }
+
+    private async Task LoadHornAudioAsync()
+    {
+        try
+        {
+            var hornPath = Path.Combine("wwwroot", "horn.mp3");
+            if (!File.Exists(hornPath))
+            {
+                _logger?.LogWarning($"Horn audio file not found at {hornPath}");
+                return;
+            }
+
+            _logger?.LogInformation($"Loading horn audio from {hornPath}");
+
+            // Use ffmpeg to decode MP3 to raw PCM (16kHz, 16-bit, stereo)
+            var psi = new ProcessStartInfo
+            {
+                FileName = "/usr/bin/ffmpeg",
+                Arguments = $"-i \"{hornPath}\" -f s16le -ar {SampleRate} -ac {PlaybackChannels} -",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null)
+            {
+                _logger?.LogError("Failed to start ffmpeg for horn audio decoding");
+                return;
+            }
+
+            // Read decoded audio into memory
+            using var ms = new MemoryStream();
+            await process.StandardOutput.BaseStream.CopyToAsync(ms);
+            await process.WaitForExitAsync();
+
+            if (process.ExitCode != 0)
+            {
+                var error = await process.StandardError.ReadToEndAsync();
+                _logger?.LogError($"ffmpeg failed with exit code {process.ExitCode}: {error}");
+                return;
+            }
+
+            lock (_hornDataLock)
+            {
+                _hornAudioData = ms.ToArray();
+            }
+
+            _logger?.LogInformation($"Horn audio loaded: {_hornAudioData.Length} bytes ({_hornAudioData.Length / (SampleRate * PlaybackChannels * 2)} seconds)");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to load horn audio file");
+        }
     }
 
     public void PlayAudioChunk(byte[] audioData)
@@ -2317,69 +2377,102 @@ sealed class AudioPlaybackService
     {
         lock (_hornLock)
         {
-            if (_hornActive) return; // Already playing
+            // If already playing, ignore the press (no queuing)
+            if (_hornActive)
+            {
+                _logger?.LogDebug("Horn already playing, ignoring press");
+                return;
+            }
+
+            // Check if horn audio is loaded
+            lock (_hornDataLock)
+            {
+                if (_hornAudioData == null || _hornAudioData.Length == 0)
+                {
+                    _logger?.LogWarning("Horn audio not loaded, cannot play horn");
+                    return;
+                }
+            }
 
             _hornActive = true;
             _hornCancellation = new CancellationTokenSource();
-            _logger?.LogInformation("Horn started - playing 1000Hz sine wave");
+            _logger?.LogInformation("Horn started - playing horn.mp3 once");
 
-            // Start continuous horn generation in background
-            _ = Task.Run(() => HornGenerationLoop(_hornCancellation.Token));
+            // Start single horn playback in background
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await HornGenerationLoop(_hornCancellation.Token);
+                }
+                finally
+                {
+                    // Mark as finished when done
+                    lock (_hornLock)
+                    {
+                        _hornActive = false;
+                        _hornCancellation?.Dispose();
+                        _hornCancellation = null;
+                        _logger?.LogInformation("Horn finished");
+                    }
+                }
+            });
         }
     }
 
     public void StopHorn()
     {
-        lock (_hornLock)
-        {
-            if (!_hornActive) return;
-
-            _hornActive = false;
-            _hornCancellation?.Cancel();
-            _hornCancellation?.Dispose();
-            _hornCancellation = null;
-            _logger?.LogInformation("Horn stopped");
-        }
+        // No-op: horn plays once and stops automatically
+        // This method is kept for API compatibility but does nothing
     }
 
     private async Task HornGenerationLoop(CancellationToken cancellationToken)
     {
-        int frequencyHz = 1000;
-        int chunkDurationMs = 100; // Generate 100ms chunks
-        int samplesPerChunk = SampleRate * chunkDurationMs / 1000;
-        double twoPiFreq = 2.0 * Math.PI * frequencyHz;
+        const int chunkDurationMs = 100; // 100ms chunks
+        const int chunkSizeBytes = SampleRate * chunkDurationMs / 1000 * PlaybackChannels * 2; // 16-bit samples
 
-        int sampleCounter = 0;
-
-        while (!cancellationToken.IsCancellationRequested)
+        byte[]? hornData = null;
+        lock (_hornDataLock)
         {
-            // Generate one chunk of horn audio
-            var hornChunk = new byte[samplesPerChunk * PlaybackChannels * 2]; // 2 bytes per 16-bit sample
-
-            for (int i = 0; i < samplesPerChunk; i++)
+            if (_hornAudioData == null || _hornAudioData.Length == 0)
             {
-                // Generate sine wave sample
-                double time = (double)(sampleCounter + i) / SampleRate;
-                double sample = Math.Sin(twoPiFreq * time);
-
-                // Convert to 16-bit PCM
-                short pcmSample = (short)(sample * 32767);
-                byte[] sampleBytes = BitConverter.GetBytes(pcmSample);
-
-                // Write to both left and right channels (stereo)
-                int leftIdx = i * PlaybackChannels * 2;
-                int rightIdx = leftIdx + 2;
-
-                sampleBytes.CopyTo(hornChunk, leftIdx);  // Left channel
-                sampleBytes.CopyTo(hornChunk, rightIdx); // Right channel
+                _logger?.LogError("Horn audio data not available");
+                return;
             }
+            hornData = _hornAudioData;
+        }
 
-            sampleCounter += samplesPerChunk;
+        int position = 0; // Current position in the audio data
+
+        // Play through the entire audio file once (no looping)
+        while (position < hornData.Length && !cancellationToken.IsCancellationRequested)
+        {
+            // Extract one chunk from the horn audio
+            var hornChunk = new byte[chunkSizeBytes];
+            int bytesToCopy = Math.Min(chunkSizeBytes, hornData.Length - position);
+
+            if (bytesToCopy > 0)
+            {
+                Array.Copy(hornData, position, hornChunk, 0, bytesToCopy);
+                position += bytesToCopy;
+
+                // If the chunk is smaller than expected (end of file), pad with zeros
+                if (bytesToCopy < chunkSizeBytes)
+                {
+                    // Fill remainder with silence (zeros)
+                    Array.Clear(hornChunk, bytesToCopy, chunkSizeBytes - bytesToCopy);
+                }
+            }
+            else
+            {
+                // End of audio
+                break;
+            }
 
             // Queue the horn audio chunk
             PlayAudioChunk(hornChunk);
 
-            // Wait before generating next chunk
+            // Wait before playing next chunk
             await Task.Delay(chunkDurationMs, cancellationToken);
         }
     }

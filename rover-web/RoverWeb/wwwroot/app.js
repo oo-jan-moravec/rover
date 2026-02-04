@@ -1970,47 +1970,32 @@ if (muteBtn) {
   muteBtn.addEventListener('touchend', toggleMute, { passive: false });
 }
 
-// Horn button handlers (press and hold, like PTT)
-function startHorn(e) {
+// Horn button handlers (one press = one sound)
+function playHorn(e) {
   if (!isOperator || hornBtn.classList.contains('disabled')) return;
   e.preventDefault();
   e.stopPropagation();
   
-  // Send horn start command to rover
+  // Send horn play command to rover (backend handles single play and ignores if already playing)
   send('HORN_START');
-  console.log('Horn started');
+  console.log('Horn play requested');
   
+  // Brief visual feedback (backend will play once and finish automatically)
   if (hornBtn) {
     hornBtn.classList.add('active');
-  }
-}
-
-function stopHorn() {
-  // Send horn stop command to rover
-  send('HORN_STOP');
-  console.log('Horn stopped');
-  
-  if (hornBtn) {
-    hornBtn.classList.remove('active');
+    // Remove active state after a short delay (visual feedback only)
+    setTimeout(() => {
+      if (hornBtn) {
+        hornBtn.classList.remove('active');
+      }
+    }, 200);
   }
 }
 
 if (hornBtn) {
-  // Mouse events
-  hornBtn.addEventListener('mousedown', startHorn);
-  window.addEventListener('mouseup', () => {
-    if (hornBtn.classList.contains('active')) {
-      stopHorn();
-    }
-  });
-  
-  // Touch events
-  hornBtn.addEventListener('touchstart', startHorn, { passive: false });
-  window.addEventListener('touchend', () => {
-    if (hornBtn.classList.contains('active')) {
-      stopHorn();
-    }
-  });
+  // Click events (one press = one sound)
+  hornBtn.addEventListener('click', playHorn);
+  hornBtn.addEventListener('touchend', playHorn, { passive: false });
 }
 
 // Initialize audio on page load
