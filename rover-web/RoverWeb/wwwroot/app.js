@@ -365,8 +365,24 @@ function addLogEntry(entry, markUnread = true) {
     timestamp: entry.timestamp || new Date().toISOString(),
     message: entry.message || '',
     detail: entry.detail || '',
-    level: entry.level || 'info'
+    level: entry.level || 'info',
+    repeatCount: 1 // Track how many times this message repeated
   };
+  
+  // Check if this is a repeat of the last entry (same message, detail, and level)
+  if (logEntries.length > 0) {
+    const lastEntry = logEntries[logEntries.length - 1];
+    if (lastEntry.message === normalized.message &&
+        lastEntry.detail === normalized.detail &&
+        lastEntry.level === normalized.level) {
+      // Same message - increment repeat count instead of adding new entry
+      lastEntry.repeatCount = (lastEntry.repeatCount || 1) + 1;
+      lastEntry.timestamp = normalized.timestamp; // Update timestamp to most recent
+      renderLogOverlay();
+      return; // Don't mark unread for repeats
+    }
+  }
+  
   logEntries.push(normalized);
   if (logEntries.length > MAX_LOG_LINES) {
     logEntries.shift();
@@ -382,7 +398,10 @@ function renderLogOverlay() {
   const html = logEntries.map(entry => {
     const time = formatLogTime(entry.timestamp);
     const detail = entry.detail ? `<span class=\"log-detail\">${escapeHtml(entry.detail)}</span>` : '';
-    return `<div class=\"log-line ${entry.level}\"><span class=\"log-time\">${time}</span><span class=\"log-msg\">${escapeHtml(entry.message)}</span>${detail}</div>`;
+    const repeatBadge = (entry.repeatCount && entry.repeatCount > 1) 
+      ? `<span class=\"log-repeat-badge\" title=\"This message repeated ${entry.repeatCount} times\">${entry.repeatCount}</span>` 
+      : '';
+    return `<div class=\"log-line ${entry.level}\"><span class=\"log-time\">${time}</span><span class=\"log-msg\">${escapeHtml(entry.message)}</span>${detail}${repeatBadge}</div>`;
   }).join('');
   logOverlayInner.innerHTML = html;
   if (logOverlay) {

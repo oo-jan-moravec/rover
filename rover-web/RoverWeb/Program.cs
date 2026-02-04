@@ -203,6 +203,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
             {
                 if (opManager.TryClaim(clientId))
                 {
+                    logService.Publish("ops", $"{clientName} claimed control", null, "info");
                     await BroadcastRoleUpdates();
                 }
                 else
@@ -215,11 +216,14 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                 if (opManager.RequestControl(clientId, out var operatorId))
                 {
                     // Auto-granted (no operator was present)
+                    logService.Publish("ops", $"{clientName} claimed control (auto-granted)", null, "info");
                     await BroadcastRoleUpdates();
                 }
                 else if (operatorId.HasValue)
                 {
                     // Notify operator of request
+                    var operatorName = opManager.GetCurrentOperatorName() ?? "operator";
+                    logService.Publish("ops", $"{clientName} requested control", $"from {operatorName}", "info");
                     await BroadcastRoleUpdates();
                 }
             }
@@ -228,6 +232,8 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                 var (success, newOperatorId, oldOperatorId) = opManager.AcceptRequest(clientId);
                 if (success && newOperatorId.HasValue)
                 {
+                    var newOperatorName = opManager.GetCurrentOperatorName() ?? "operator";
+                    logService.Publish("ops", $"Control transferred to {newOperatorName}", "request accepted", "info");
                     await wsManager.SendToClientAsync(newOperatorId.Value, "GRANTED");
                     await BroadcastRoleUpdates();
                     // Stop the rover when control transfers
@@ -239,6 +245,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                 var (success, requesterId) = opManager.DenyRequest(clientId);
                 if (success && requesterId.HasValue)
                 {
+                    logService.Publish("ops", "Control request denied", $"by {clientName}", "info");
                     await wsManager.SendToClientAsync(requesterId.Value, "DENIED");
                     await BroadcastRoleUpdates();
                 }
@@ -247,6 +254,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
             {
                 if (opManager.ReleaseControl(clientId))
                 {
+                    logService.Publish("ops", $"{clientName} released control", "rover stopped", "info");
                     state.Set(0, 0); // Stop rover
                     await BroadcastRoleUpdates();
                 }
@@ -258,6 +266,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
 
                 if (msg == "S")
                 {
+                    logService.Publish("safety", "Emergency stop", "operator command", "warn");
                     state.Set(0, 0);
                 }
                 else if (msg.StartsWith("M "))
@@ -265,6 +274,9 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                     // Block motor commands if motors are inhibited (ROAMING or OFFLINE)
                     if (safetyMachine.AreMotorsInhibited())
                     {
+                        // Log when motor commands are blocked due to safety inhibit
+                        var (_, _, stopReason) = safetyMachine.GetStatus();
+                        logService.Publish("safety", "Motor command blocked", $"safety inhibit: {stopReason}", "warn");
                         // Silently ignore motor commands during safety inhibit
                         // The state machine already set motors to 0
                         continue;
@@ -283,7 +295,9 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                     var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length == 2 && int.TryParse(parts[1], out var state_val))
                     {
-                        gpio.SetHeadlight(state_val == 1);
+                        var on = state_val == 1;
+                        logService.Publish("gpio", $"Headlight {(on ? "ON" : "OFF")}", null, "info");
+                        gpio.SetHeadlight(on);
                     }
                 }
                 else if (msg.StartsWith("I "))
@@ -291,7 +305,9 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                     var parts = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length == 2 && int.TryParse(parts[1], out var state_val))
                     {
-                        gpio.SetIrLed(state_val == 1);
+                        var on = state_val == 1;
+                        logService.Publish("gpio", $"IR LED {(on ? "ON" : "OFF")}", null, "info");
+                        gpio.SetIrLed(on);
                     }
                 }
                 else if (msg == "RESCAN")
@@ -316,10 +332,12 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                     // Start continuous horn sound (1000Hz sine wave)
                     try
                     {
+                        logService.Publish("audio", "Horn started", null, "info");
                         audioPlayback.StartHorn();
                     }
                     catch (Exception ex)
                     {
+                        logService.Publish("audio", "Horn start failed", ex.Message, "error");
                         Console.WriteLine($"Error starting horn: {ex.Message}");
                     }
                 }
@@ -328,10 +346,12 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                     // Stop horn sound
                     try
                     {
+                        logService.Publish("audio", "Horn stopped", null, "info");
                         audioPlayback.StopHorn();
                     }
                     catch (Exception ex)
                     {
+                        logService.Publish("audio", "Horn stop failed", ex.Message, "error");
                         Console.WriteLine($"Error stopping horn: {ex.Message}");
                     }
                 }
@@ -347,6 +367,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
         // If operator disconnected, notify all clients
         if (wasOperator)
         {
+            logService.Publish("ops", $"{clientName} disconnected", "rover stopped", "warn");
             state.Set(0, 0); // Stop rover
             foreach (var id in wsManager.GetAllClientIds())
             {
@@ -1373,12 +1394,15 @@ sealed class SerialPump : BackgroundService
     private const int SendHz = 20;                 // command stream rate
     private static readonly TimeSpan IdleStop = TimeSpan.FromMilliseconds(250); // stop if GUI silent
 
-    public SerialPump(RoverState state, SafetyStateMachine safetyMachine, WebSocketManager wsManager, ILogger<SerialPump>? logger = null)
+    private readonly RoverLogService? _logService;
+
+    public SerialPump(RoverState state, SafetyStateMachine safetyMachine, WebSocketManager wsManager, ILogger<SerialPump>? logger = null, RoverLogService? logService = null)
     {
         _state = state;
         _safetyMachine = safetyMachine;
         _wsManager = wsManager;
         _logger = logger;
+        _logService = logService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1398,10 +1422,12 @@ sealed class SerialPump : BackgroundService
             _sp.Open();
             serialAvailable = true;
             _logger?.LogInformation("Serial port opened successfully");
+            _logService?.Publish("serial", "Serial port opened", PortName, "info");
         }
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Serial port not available, continuing without it");
+            _logService?.Publish("serial", "Serial port unavailable", ex.Message, "warn");
         }
 
         while (!stoppingToken.IsCancellationRequested)
@@ -1433,11 +1459,12 @@ sealed class SerialPump : BackgroundService
                 {
                     _sp.Write(cmd);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
                     // Serial error, mark as unavailable
                     serialAvailable = false;
                     _logger?.LogError("Serial port error, marking as unavailable");
+                    _logService?.Publish("serial", "Serial port error", ex.Message, "error");
                 }
             }
 
@@ -1456,10 +1483,12 @@ sealed class SerialPump : BackgroundService
             {
                 _sp.Write("S\n");
                 _logger?.LogWarning("IMMEDIATE STOP sent to UNO");
+                _logService?.Publish("serial", "Immediate stop sent", "safety override", "warn");
             }
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Failed to send immediate stop");
+                _logService?.Publish("serial", "Failed to send immediate stop", ex.Message, "error");
             }
         }
     }
@@ -1687,11 +1716,14 @@ sealed class SafetyStateMachine
     private const double DEGRADED_DURATION_SEC = 2.0;
     private const double STABLE_AFTER_ROAM_SEC = 1.0;
 
-    public SafetyStateMachine(WifiState wifiState, RoverState roverState, ILogger<SafetyStateMachine>? logger = null)
+    private readonly RoverLogService? _logService;
+
+    public SafetyStateMachine(WifiState wifiState, RoverState roverState, ILogger<SafetyStateMachine>? logger = null, RoverLogService? logService = null)
     {
         _wifiState = wifiState;
         _roverState = roverState;
         _logger = logger;
+        _logService = logService;
     }
 
     /// <summary>
@@ -1724,6 +1756,7 @@ sealed class SafetyStateMachine
                     shouldSendStop = true;
                     stopReason = "offline";
                     _logger?.LogWarning("Safety: Transition to OFFLINE - Wi-Fi disconnected");
+                    _logService?.Publish("safety", "Safety state: OFFLINE", "motors inhibited", "warn");
                 }
             }
             else if (_wifiState.DetectRoamingInProgress())
@@ -1735,6 +1768,7 @@ sealed class SafetyStateMachine
                     shouldSendStop = true;
                     stopReason = "roaming";
                     _logger?.LogWarning($"Safety: Transition to ROAMING - BSSID change detected");
+                    _logService?.Publish("safety", "Safety state: ROAMING", "motors inhibited during AP switch", "warn");
                 }
             }
             else if (rssi <= RSSI_CRITICAL_THRESHOLD)
@@ -1745,10 +1779,12 @@ sealed class SafetyStateMachine
                     if (_currentState == SafetyState.OFFLINE)
                     {
                         _logger?.LogInformation($"Safety: Transition OFFLINE → DEGRADED - Connected but critical RSSI {rssi} dBm");
+                        _logService?.Publish("safety", "Safety state: DEGRADED", $"Connected but critical RSSI {rssi} dBm", "warn");
                     }
                     else
                     {
                         _logger?.LogWarning($"Safety: Transition to DEGRADED - Critical RSSI {rssi} dBm");
+                        _logService?.Publish("safety", "Safety state: DEGRADED", $"Critical RSSI {rssi} dBm", "warn");
                     }
                     _currentState = SafetyState.DEGRADED;
                     _degradedSince = DateTime.UtcNow;
@@ -1765,6 +1801,7 @@ sealed class SafetyStateMachine
                         _currentState = SafetyState.DEGRADED;
                         _degradedSince = DateTime.UtcNow;
                         _logger?.LogInformation($"Safety: Transition OFFLINE → DEGRADED - Connected, RSSI {rssi} dBm");
+                        _logService?.Publish("safety", "Safety state: DEGRADED", $"Connected, RSSI {rssi} dBm", "info");
                     }
                     else if (_degradedSince == DateTime.MinValue)
                     {
@@ -1774,6 +1811,7 @@ sealed class SafetyStateMachine
                     {
                         _currentState = SafetyState.DEGRADED;
                         _logger?.LogWarning($"Safety: Transition to DEGRADED - RSSI {rssi} dBm, RTT {avgRtt} ms");
+                        _logService?.Publish("safety", "Safety state: DEGRADED", $"RSSI {rssi} dBm, RTT {avgRtt} ms", "warn");
                     }
                 }
             }
@@ -1790,17 +1828,29 @@ sealed class SafetyStateMachine
                     {
                         _currentState = SafetyState.OK;
                         _logger?.LogInformation($"Safety: Transition to OK - Roaming complete, new BSSID {bssid}");
+                        _logService?.Publish("safety", "Safety state: OK", $"Roaming complete, motors enabled", "info");
                     }
                 }
                 else if (_currentState == SafetyState.DEGRADED || _currentState == SafetyState.OFFLINE)
                 {
+                    if (previousState != SafetyState.OK)
+                    {
+                        _logService?.Publish("safety", "Safety state: OK", $"RSSI {rssi} dBm, motors enabled", "info");
+                    }
                     _currentState = SafetyState.OK;
                     _logger?.LogInformation($"Safety: Transition to OK - RSSI {rssi} dBm");
                 }
             }
 
             // Update motor inhibition
+            var wasInhibited = _motorsInhibited;
             _motorsInhibited = _currentState == SafetyState.ROAMING || _currentState == SafetyState.OFFLINE;
+
+            // Log when motors are enabled after being inhibited
+            if (wasInhibited && !_motorsInhibited && previousState != _currentState)
+            {
+                _logService?.Publish("safety", "Motors enabled", $"safety state: {_currentState}", "info");
+            }
 
             // Send stop only once per transition
             if (shouldSendStop && (DateTime.UtcNow - _lastStopSentAt).TotalMilliseconds > 500)
