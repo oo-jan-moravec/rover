@@ -6,11 +6,12 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-const string CLIENT_VERSION = "1.5.0"; // Local operator control only
+const string CLIENT_VERSION = "1.6.0"; // Local operator control only
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<RoverState>();
 builder.Services.AddSingleton<WebSocketManager>();
+builder.Services.AddSingleton<RoverLogService>();
 builder.Services.AddSingleton<OperatorManager>();
 builder.Services.AddSingleton<GpioController>();
 builder.Services.AddSingleton<WifiState>();
@@ -97,7 +98,7 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.UseWebSockets();
 
-app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, OperatorManager opManager, GpioController gpio, SafetyStateMachine safetyMachine, AudioPlaybackService audioPlayback) =>
+app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsManager, OperatorManager opManager, GpioController gpio, SafetyStateMachine safetyMachine, AudioPlaybackService audioPlayback, RoverLogService logService) =>
 {
     if (!ctx.WebSockets.IsWebSocketRequest)
     {
@@ -169,6 +170,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
         await wsManager.SendToClientAsync(clientId, "VERSION_OK");
         await wsManager.SendToClientAsync(clientId, $"NAME:{clientName}");
         await SendRoleStatus(clientId);
+        await logService.SendHistoryAsync(clientId);
 
         while (ws.State == WebSocketState.Open)
         {
@@ -300,7 +302,7 @@ app.Map("/ws", async (HttpContext ctx, RoverState state, WebSocketManager wsMana
                         try
                         {
                             await wsManager.SendToClientAsync(clientId, "RESCAN:started");
-                            var result = await WifiRecoveryWatchdog.TriggerRescanAndRoamAsync();
+                            var result = await WifiRecoveryWatchdog.TriggerRescanAndRoamAsync(logService, "manual");
                             await wsManager.SendToClientAsync(clientId, $"RESCAN:{result}");
                         }
                         catch (Exception ex)
@@ -421,17 +423,112 @@ app.Run("http://0.0.0.0:8080");
 
 static int Clamp(int v) => Math.Max(-255, Math.Min(255, v));
 
+sealed class RoverLogService
+{
+    private readonly WebSocketManager _wsManager;
+    private readonly ILogger<RoverLogService> _logger;
+    private readonly Queue<LogEntry> _history = new();
+    private readonly object _lock = new();
+    private const int MaxEntries = 100;
+    private readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    public RoverLogService(WebSocketManager wsManager, ILogger<RoverLogService> logger)
+    {
+        _wsManager = wsManager;
+        _logger = logger;
+    }
+
+    public void Publish(string category, string message, string? detail = null, string level = "info")
+    {
+        var entry = new LogEntry
+        {
+            Timestamp = DateTime.UtcNow.ToString("o"),
+            Category = category,
+            Message = message,
+            Detail = detail,
+            Level = level
+        };
+
+        lock (_lock)
+        {
+            _history.Enqueue(entry);
+            while (_history.Count > MaxEntries)
+            {
+                _history.Dequeue();
+            }
+        }
+
+        var payload = JsonSerializer.Serialize(entry, _jsonOptions);
+        _ = _wsManager.BroadcastAsync($"LOG:{payload}");
+        _logger.LogInformation("[{Category}] {Message} {Detail}", category, message, detail);
+    }
+
+    public async Task SendHistoryAsync(Guid clientId, int maxEntries = 20)
+    {
+        List<LogEntry> snapshot;
+        lock (_lock)
+        {
+            snapshot = _history.Skip(Math.Max(0, _history.Count - maxEntries)).ToList();
+        }
+
+        if (snapshot.Count == 0) return;
+
+        var payload = JsonSerializer.Serialize(snapshot, _jsonOptions);
+        await _wsManager.SendToClientAsync(clientId, $"LOGH:{payload}");
+    }
+
+    public record LogEntry
+    {
+        public string Timestamp { get; init; } = "";
+        public string Category { get; init; } = "";
+        public string Message { get; init; } = "";
+        public string? Detail { get; init; }
+        public string Level { get; init; } = "info";
+    }
+}
+
 sealed class WifiRecoveryWatchdog : BackgroundService
 {
     private readonly RoverState _state;
     private readonly OperatorManager _opManager;
+    private readonly WifiState _wifiState;
+    private readonly WifiMonitor _wifiMonitor;
+    private readonly RoverLogService _logService;
     private readonly ILogger<WifiRecoveryWatchdog> _logger;
     private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan WifiStateStaleTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan OfflineTriggerDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DegradedTriggerDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RecoveryCooldown = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ApScanInterval = TimeSpan.FromSeconds(8);
+    private const int DegradedRssiThreshold = -65;
+    private const long DegradedRttThresholdMs = 220;
+    private const int BetterApImprovementDb = 5;
 
-    public WifiRecoveryWatchdog(RoverState state, OperatorManager opManager, ILogger<WifiRecoveryWatchdog> logger)
+    private DateTime _lastRecoveryAttempt = DateTime.MinValue;
+    private DateTime? _offlineSince;
+    private DateTime? _degradedSince;
+    private bool _recoveryInProgress;
+    private DateTime _lastApScanAt = DateTime.MinValue;
+    private List<WifiMonitor.NearbyAp> _lastApScan = new();
+
+    public WifiRecoveryWatchdog(
+        RoverState state,
+        OperatorManager opManager,
+        WifiState wifiState,
+        WifiMonitor wifiMonitor,
+        RoverLogService logService,
+        ILogger<WifiRecoveryWatchdog> logger)
     {
         _state = state;
         _opManager = opManager;
+        _wifiState = wifiState;
+        _wifiMonitor = wifiMonitor;
+        _logService = logService;
         _logger = logger;
     }
 
@@ -441,44 +538,233 @@ sealed class WifiRecoveryWatchdog : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-
-            if (_opManager.HasOperator())
+            try
             {
-                var (_, _, lastUpdate) = _state.Get();
-                var idleTime = DateTime.UtcNow - lastUpdate;
-
-                if (idleTime > Timeout)
-                {
-                    _logger.LogWarning("Operator present but no command received for {IdleTime}s. Triggering Wi-Fi recovery...", (int)idleTime.TotalSeconds);
-
-                    // Reset the timer so we don't spam restarts
-                    _state.Touch();
-
-                    try
-                    {
-                        var result = await TriggerRescanAndRoamAsync();
-                        _logger.LogInformation("Automatic Wi-Fi recovery result: {Result}", result);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error during automatic Wi-Fi recovery");
-                    }
-                }
+                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+                await EvaluateOperatorIdleAsync();
+                await EvaluateWifiHealthAsync();
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "WifiRecoveryWatchdog loop error");
             }
         }
+    }
+
+    private async Task EvaluateOperatorIdleAsync()
+    {
+        if (!_opManager.HasOperator())
+            return;
+
+        var (_, _, lastUpdate) = _state.Get();
+        var idleTime = DateTime.UtcNow - lastUpdate;
+
+        if (idleTime <= Timeout)
+            return;
+
+        _logService.Publish("ops", "Operator idle watchdog tripped", $"{(int)idleTime.TotalSeconds}s without input", "warn");
+        _state.Touch(); // Reset timer so we don't spam restarts
+        await TryTriggerRecoveryAsync("operator_idle");
+    }
+
+    private async Task EvaluateWifiHealthAsync()
+    {
+        var (rssi, bssid, ssid, _, _, _, connected, lastUpdate, _, avgRtt) = _wifiState.Get();
+        var now = DateTime.UtcNow;
+        var dataStale = (now - lastUpdate) > WifiStateStaleTimeout;
+
+        if (!connected || dataStale)
+        {
+            _degradedSince = null;
+            if (_offlineSince == null)
+            {
+                _offlineSince = now;
+                _logService.Publish("wifi", "Wi-Fi link lost", dataStale ? "telemetry stalled" : "radio disconnected", "warn");
+                return;
+            }
+
+            if ((now - _offlineSince) >= OfflineTriggerDelay)
+            {
+                _offlineSince = now;
+                await TryTriggerRecoveryAsync("offline");
+            }
+
+            return;
+        }
+
+        _offlineSince = null;
+
+        var isDegraded = rssi <= DegradedRssiThreshold || avgRtt > DegradedRttThresholdMs;
+        if (!isDegraded || string.IsNullOrEmpty(ssid))
+        {
+            _degradedSince = null;
+            return;
+        }
+
+        if (_degradedSince == null)
+        {
+            _degradedSince = now;
+            _logService.Publish("wifi", $"Link degraded (RSSI {rssi} dBm, RTT {avgRtt} ms)", ssid);
+            return;
+        }
+
+        if ((now - _degradedSince.Value) < DegradedTriggerDelay)
+            return;
+
+        if (_recoveryInProgress || !IsRecoveryCooldownElapsed(now))
+            return;
+
+        _degradedSince = now;
+
+        try
+        {
+            var aps = await GetNearbyApsSnapshotAsync(ssid, now);
+            var betterAp = aps.FirstOrDefault(ap =>
+                !ap.Bssid.Equals(bssid, StringComparison.OrdinalIgnoreCase) &&
+                ap.RssiDbm >= rssi + BetterApImprovementDb);
+
+            if (betterAp != null)
+            {
+                await TryTriggerRecoveryAsync($"better_ap:{ShortBssid(betterAp.Bssid)}", betterAp);
+                return;
+            }
+
+            await TryTriggerRecoveryAsync("degraded_no_better");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to evaluate better APs for auto-roam");
+            _logService.Publish("wifi", "AP scan failed", ex.Message, "error");
+        }
+    }
+
+    private async Task TryTriggerRecoveryAsync(string reason, WifiMonitor.NearbyAp? targetAp = null)
+    {
+        if (_recoveryInProgress)
+            return;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastRecoveryAttempt) < RecoveryCooldown)
+            return;
+
+        _recoveryInProgress = true;
+        _lastRecoveryAttempt = now;
+
+        try
+        {
+            if (targetAp != null)
+            {
+                var shortId = ShortBssid(targetAp.Bssid);
+                _logService.Publish("wifi", $"Roaming to {shortId}", $"{targetAp.RssiDbm} dBm ({reason})");
+                var success = await TryDirectRoamAsync(targetAp);
+                if (success)
+                {
+                    return;
+                }
+
+                _logService.Publish("wifi", $"Roam to {shortId} failed", "fallback to rescan", "warn");
+            }
+
+            _logService.Publish("wifi", "Running Wi-Fi recovery", reason);
+            var result = await TriggerRescanAndRoamAsync(_logService, reason);
+            _logger.LogInformation("Automatic Wi-Fi recovery result: {Result}", result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during automatic Wi-Fi recovery ({Reason})", reason);
+            _logService.Publish("wifi", "Recovery exception", ex.Message, "error");
+        }
+        finally
+        {
+            _recoveryInProgress = false;
+        }
+    }
+
+    private async Task<bool> TryDirectRoamAsync(WifiMonitor.NearbyAp targetAp)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/wpa_cli",
+                Arguments = $"-i wlan0 roam {targetAp.Bssid}",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process != null)
+            {
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if (output.Contains("OK"))
+                {
+                    _logService.Publish("wifi", $"Roam complete ({ShortBssid(targetAp.Bssid)})", $"RSSI {targetAp.RssiDbm} dBm");
+                    return true;
+                }
+
+                _logService.Publish("wifi", "Roam command response", output.Trim(), "warn");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Direct roam failed");
+            _logService.Publish("wifi", "Direct roam error", ex.Message, "error");
+        }
+
+        return false;
+    }
+
+    private bool IsRecoveryCooldownElapsed(DateTime? nowOverride = null)
+    {
+        var now = nowOverride ?? DateTime.UtcNow;
+        return (now - _lastRecoveryAttempt) >= RecoveryCooldown;
+    }
+
+    private async Task<List<WifiMonitor.NearbyAp>> GetNearbyApsSnapshotAsync(string ssid, DateTime now)
+    {
+        if (_lastApScan.Count > 0 && (now - _lastApScanAt) < ApScanInterval)
+        {
+            return _lastApScan;
+        }
+
+        try
+        {
+            var aps = await _wifiMonitor.GetNearbyApsAsync(ssid);
+            _lastApScan = aps;
+            _lastApScanAt = now;
+            return aps;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AP scan failed");
+            _logService.Publish("wifi", "AP scan error", ex.Message, "error");
+            return _lastApScan;
+        }
+    }
+
+    private static string ShortBssid(string? bssid)
+    {
+        if (string.IsNullOrEmpty(bssid)) return "unknown";
+        return bssid.Length <= 8 ? bssid.ToUpperInvariant() : bssid[^8..].ToUpperInvariant();
     }
 
     /// <summary>
     /// Trigger a Wi-Fi recovery using surgical methods (soft reassociate/roam) first,
     /// falling back to a hard interface reset if necessary.
     /// </summary>
-    public static async Task<string> TriggerRescanAndRoamAsync()
+    public static async Task<string> TriggerRescanAndRoamAsync(RoverLogService? logService = null, string reason = "manual")
     {
         try
         {
-            // Step 1: Try soft recovery (reassociate)
-            // Forces the chip to re-scan and connect to the best known AP without dropping the driver.
+            logService?.Publish("wifi", "Soft recovery (reassociate + scan)", reason);
+
             var reassociatePsi = new ProcessStartInfo
             {
                 FileName = "/usr/sbin/wpa_cli",
@@ -496,7 +782,6 @@ sealed class WifiRecoveryWatchdog : BackgroundService
 
             await Task.Delay(1000); // Wait for reassociate to trigger
 
-            // Step 2: Trigger scan
             var scanPsi = new ProcessStartInfo
             {
                 FileName = "/usr/sbin/wpa_cli",
@@ -514,14 +799,15 @@ sealed class WifiRecoveryWatchdog : BackgroundService
 
             await Task.Delay(2000); // Wait for scan to complete
 
-            // Step 3: Evaluate and potentially roam
             var softResult = await EvaluateAndRoamAsync();
+            logService?.Publish("wifi", "Soft recovery result", softResult, softResult.StartsWith("roamed") ? "info" : "warn");
             if (softResult.StartsWith("roamed") || softResult.StartsWith("already_best"))
             {
                 return $"soft_{softResult}";
             }
 
-            // Step 4: Fallback to hard recovery if soft recovery didn't result in a good connection
+            logService?.Publish("wifi", "Hard recovery (interface reset)", reason);
+
             var downPsi = new ProcessStartInfo
             {
                 FileName = "/usr/sbin/ifconfig",
@@ -558,7 +844,6 @@ sealed class WifiRecoveryWatchdog : BackgroundService
 
             await Task.Delay(4000); // Wait for interface to reconnect
 
-            // One more scan after hard reset
             using (var scanProcess = Process.Start(scanPsi))
             {
                 if (scanProcess != null)
@@ -567,10 +852,12 @@ sealed class WifiRecoveryWatchdog : BackgroundService
             await Task.Delay(2000);
 
             var hardResult = await EvaluateAndRoamAsync();
+            logService?.Publish("wifi", "Hard recovery result", hardResult, hardResult.StartsWith("roamed") ? "info" : "warn");
             return $"hard_{hardResult}";
         }
         catch (Exception ex)
         {
+            logService?.Publish("wifi", "Recovery pipeline error", ex.Message, "error");
             return $"error:{ex.Message}";
         }
     }
@@ -579,7 +866,6 @@ sealed class WifiRecoveryWatchdog : BackgroundService
     {
         try
         {
-            // Get current connection info
             var linkPsi = new ProcessStartInfo
             {
                 FileName = "/usr/sbin/iw",
@@ -614,7 +900,6 @@ sealed class WifiRecoveryWatchdog : BackgroundService
                 }
             }
 
-            // Get scan results
             var resultsPsi = new ProcessStartInfo
             {
                 FileName = "/usr/sbin/wpa_cli",
@@ -642,7 +927,6 @@ sealed class WifiRecoveryWatchdog : BackgroundService
                         {
                             var ssid = parts.Length >= 5 ? parts[4].Trim() : "";
 
-                            // Only consider APs with same SSID or empty SSID (mesh nodes)
                             if (!string.IsNullOrEmpty(currentSsid) &&
                                 ssid != currentSsid && !string.IsNullOrEmpty(ssid))
                                 continue;
@@ -657,7 +941,6 @@ sealed class WifiRecoveryWatchdog : BackgroundService
                 }
             }
 
-            // Check if we should roam
             if (string.IsNullOrEmpty(bestBssid))
             {
                 return "no_aps_found";
@@ -668,12 +951,11 @@ sealed class WifiRecoveryWatchdog : BackgroundService
                 return $"already_best:{bestRssi}";
             }
 
-            if (bestRssi <= currentRssi + 3) // Need at least 3dB improvement
+            if (bestRssi <= currentRssi + 3)
             {
                 return $"no_better_ap:{currentRssi}:{bestRssi}";
             }
 
-            // Roam to best AP
             var roamPsi = new ProcessStartInfo
             {
                 FileName = "/usr/sbin/wpa_cli",
@@ -709,6 +991,7 @@ sealed class WifiRecoveryWatchdog : BackgroundService
         }
     }
 }
+
 
 sealed class WebSocketManager
 {

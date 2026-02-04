@@ -1,4 +1,4 @@
-const CLIENT_VERSION = "1.5.0"; // Local operator control only
+const CLIENT_VERSION = "1.6.0"; // Local operator control only
 
 console.log(`Mode: LOCAL`);
 
@@ -21,9 +21,28 @@ const wifiStateIcon = document.getElementById("wifiStateIcon");
 const wifiStateLabel = document.getElementById("wifiStateLabel");
 const wifiStateDetail = document.getElementById("wifiStateDetail");
 const wifiApCount = document.getElementById("wifiApCount");
+const logOverlay = document.getElementById("logOverlay");
+const logOverlayInner = document.getElementById("logOverlayInner");
+const wifiLogToggle = document.getElementById("wifiLogToggle");
+const MAX_LOG_LINES = 40;
+let logEntries = [];
+let logOverlayVisible = false;
 const motorInhibitedOverlay = document.getElementById("motorInhibitedOverlay");
 const motorInhibitedText = document.getElementById("motorInhibitedText");
 const nearbyApsList = document.getElementById("nearbyApsList");
+
+if (wifiLogToggle) {
+  wifiLogToggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    logOverlayVisible = !logOverlayVisible;
+    wifiLogToggle.classList.toggle("active", logOverlayVisible);
+    wifiLogToggle.classList.remove("has-updates");
+    if (logOverlay) {
+      logOverlay.classList.toggle("visible", logOverlayVisible);
+    }
+  });
+}
 
 // Wi-Fi banner expand/collapse
 if (wifiStateHeader) {
@@ -340,6 +359,53 @@ function updateMotorInhibitDisplay() {
   }
 }
 
+function addLogEntry(entry, markUnread = true) {
+  if (!entry) return;
+  const normalized = {
+    timestamp: entry.timestamp || new Date().toISOString(),
+    message: entry.message || '',
+    detail: entry.detail || '',
+    level: entry.level || 'info'
+  };
+  logEntries.push(normalized);
+  if (logEntries.length > MAX_LOG_LINES) {
+    logEntries.shift();
+  }
+  renderLogOverlay();
+  if (!logOverlayVisible && markUnread && wifiLogToggle) {
+    wifiLogToggle.classList.add('has-updates');
+  }
+}
+
+function renderLogOverlay() {
+  if (!logOverlayInner) return;
+  const html = logEntries.map(entry => {
+    const time = formatLogTime(entry.timestamp);
+    const detail = entry.detail ? `<span class=\"log-detail\">${escapeHtml(entry.detail)}</span>` : '';
+    return `<div class=\"log-line ${entry.level}\"><span class=\"log-time\">${time}</span><span class=\"log-msg\">${escapeHtml(entry.message)}</span>${detail}</div>`;
+  }).join('');
+  logOverlayInner.innerHTML = html;
+  if (logOverlay) {
+    logOverlay.classList.toggle('visible', logOverlayVisible);
+  }
+}
+
+function formatLogTime(ts) {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return '--:--:--';
+  return date.toLocaleTimeString([], { hour12: false });
+}
+
+function escapeHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // WebSocket connection
 function connect() {
   // Clear any existing timers
@@ -491,6 +557,22 @@ function connectLocal() {
         // Handle rescan response
         const result = msg.substring(7);
         handleRescanResult(result);
+      } else if (msg.startsWith("LOG:")) {
+        try {
+          const entry = JSON.parse(msg.substring(4));
+          addLogEntry(entry, true);
+        } catch (e) {
+          console.error("Failed to parse LOG message", e);
+        }
+      } else if (msg.startsWith("LOGH:")) {
+        try {
+          const entries = JSON.parse(msg.substring(5));
+          if (Array.isArray(entries)) {
+            entries.forEach(entry => addLogEntry(entry, false));
+          }
+        } catch (e) {
+          console.error("Failed to parse LOG history", e);
+        }
       } else if (msg === "GRANTED") {
         // Our request was accepted
         requestPending = false;

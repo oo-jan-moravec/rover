@@ -317,6 +317,51 @@
         height: 100%;
         border: 0;
       }
+      .log-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        display: none;
+        padding: 10px;
+        font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+        font-size: 0.85rem;
+        line-height: 1.2;
+        color: #b6ff82;
+        z-index: 4;
+      }
+      .log-overlay.visible {
+        display: block;
+      }
+      .log-overlay-inner {
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 4px;
+        height: 100%;
+        overflow: hidden;
+      }
+      .log-line {
+        padding: 2px 6px;
+        border-left: 2px solid #7dff6c;
+        text-shadow: 0 0 6px rgba(0, 255, 128, 0.4);
+      }
+      .log-line.warn {
+        border-color: #ffb347;
+        color: #ffe0a3;
+      }
+      .log-line.error {
+        border-color: #ff6b6b;
+        color: #ffc1c1;
+      }
+      .log-line .log-time {
+        margin-right: 8px;
+        opacity: 0.85;
+      }
+      .log-line .log-detail {
+        display: block;
+        font-size: 0.78em;
+        opacity: 0.85;
+      }
       .controls-section {
         position: relative;
         background: #161b22;
@@ -799,6 +844,36 @@
         background: rgba(0, 0, 0, 0.2);
         padding: 2px 6px;
         border-radius: 10px;
+      }
+      .wifi-log-toggle {
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        background: rgba(13, 17, 23, 0.6);
+        color: #8b949e;
+        width: 30px;
+        height: 30px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        margin-left: 8px;
+        position: relative;
+      }
+      .wifi-log-toggle.active {
+        color: #baff61;
+        border-color: #baff61;
+        box-shadow: 0 0 8px rgba(186, 255, 97, 0.3);
+      }
+      .wifi-log-toggle.has-updates::after {
+        content: "";
+        position: absolute;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #ff6b6b;
+        top: 4px;
+        right: 4px;
       }
       /* Nearby APs list (inside expandable Wi-Fi banner) */
       .nearby-aps-list {
@@ -1359,6 +1434,15 @@
               </button>
             </div>
           </div>
+          <div
+            class="log-overlay"
+            id="logOverlay"
+          >
+            <div
+              class="log-overlay-inner"
+              id="logOverlayInner"
+            ></div>
+          </div>
         </div>
       </div>
 
@@ -1400,6 +1484,14 @@
               id="wifiApCount"
               >0 APs</span
             >
+            <button
+              class="wifi-log-toggle"
+              id="wifiLogToggle"
+              type="button"
+              title="Toggle rover log overlay"
+            >
+              <i class="fa-light fa-terminal"></i>
+            </button>
             <i class="fa-light fa-chevron-down wifi-state-expand"></i>
           </div>
           <div class="wifi-state-details">
