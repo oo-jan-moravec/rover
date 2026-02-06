@@ -1,0 +1,11 @@
+global using System.Collections.Concurrent;
+global using System.Device.Gpio;
+global using System.Diagnostics;
+global using System.IO.Ports;
+global using System.Net.WebSockets;
+global using System.Text;
+global using System.Text.Json;
+global using System.Text.Json.Serialization;
+global using System.Text.RegularExpressions;
+global using Microsoft.Extensions.Hosting;
+global using Microsoft.Extensions.Logging;
